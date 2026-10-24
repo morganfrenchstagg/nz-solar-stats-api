@@ -3,6 +3,8 @@ import { Hono } from "hono";
 import { tasksRouter } from "./endpoints/tasks/router";
 import { ContentfulStatusCode } from "hono/utils/http-status";
 import { DummyEndpoint } from "./endpoints/dummyEndpoint";
+import { runCapacityJob } from "./capacity/job";
+import { solarCapacityRouter } from "./endpoints/solarCapacity/router";
 
 // Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
@@ -33,12 +35,15 @@ const openapi = fromHono(app, {
 	docs_url: "/",
 	schema: {
 		info: {
-			title: "My Awesome API",
+			title: "NZ Solar Stats API",
 			version: "2.0.0",
-			description: "This is the documentation for my awesome API.",
+			description:
+				"Distributed solar in New Zealand, per GXP. Capacities are nameplate MW AC from the Electricity Authority registry, not DC MWp.",
 		},
 	},
 });
+
+openapi.route("/solar-capacity", solarCapacityRouter);
 
 // Register Tasks Sub router
 openapi.route("/tasks", tasksRouter);
@@ -46,5 +51,9 @@ openapi.route("/tasks", tasksRouter);
 // Register other endpoints
 openapi.post("/dummy/:slug", DummyEndpoint);
 
-// Export the Hono app
-export default app;
+export default {
+	fetch: app.fetch,
+	async scheduled(_controller, env) {
+		await runCapacityJob(env);
+	},
+} satisfies ExportedHandler<Env>;

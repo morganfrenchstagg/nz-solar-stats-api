@@ -20,6 +20,37 @@ Besides being able to see the OpenAPI schema (openapi.json) in the browser, you 
 > [!IMPORTANT]
 > When using C3 to create this project, select "no" when it asks if you want to deploy. You need to follow this project's [setup steps](https://github.com/cloudflare/templates/tree/main/openapi-template#setup-steps) before deploying.
 
+## Distributed solar capacity job
+
+A daily cron trigger (18:00 UTC) rebuilds how much solar is installed at each GXP, month by month since August 2013, from:
+
+- EMI's [installed distributed generation trends](https://www.emi.ea.govt.nz/Retail/Reports/GUEHMT) report (solar, all market segments, per root NSP)
+- the electricitymap [substations](https://api.electricitymap.frenchsta.gg/v1/substations) (GXPs) and [generators](https://api.electricitymap.frenchsta.gg/v1/generators) (dispatched solar farms)
+
+EMI counts every ICP with solar, including large farms on distribution networks that the System Operator also dispatches, such as Kōwhai Park on Orion's network at Islington. Their output is already in public generation data, so the job finds the month(s) each dispatched farm appears in EMI (a step in installed capacity that new rooftop systems can't explain) and records it as `dispatched_mw`. `distributed_mw` (installed minus dispatched) is the solar that isn't counted anywhere else. The matching rules are in `src/capacity/dispatchedSolar.ts`.
+
+All capacities are the registry's nameplate capacity in MW AC: the lower of the panels' and the inverter's rating, not DC MWp. A farm's nameplate can be above its dispatch capacity; Kōwhai Park is 160 MW in the registry against 150 MW dispatched.
+
+Tables:
+
+- `solar_capacity`: per root NSP and month end; `gxp` is the substation site ID
+- `dispatched_solar_steps`: the EMI steps attributed to each dispatched farm
+- `gxps`: the substations list
+- `capacity_job_runs`: one row per run; tables are only rewritten when the source data changed
+
+Endpoints:
+
+- `GET /solar-capacity?month=YYYY-MM`: every GXP at a month end (latest by default), with a national total
+- `GET /solar-capacity/{gxp}`: one GXP's monthly history, plus the dispatched farm steps removed from it
+
+To run it locally:
+
+```bash
+npx wrangler d1 migrations apply DB --local
+npx wrangler dev --test-scheduled
+curl "http://localhost:8787/__scheduled?cron=0+18+*+*+*"
+```
+
 ## Getting Started
 
 Outside of this repo, you can start a new project with this template using [C3](https://developers.cloudflare.com/pages/get-started/c3/) (the `create-cloudflare` CLI):
