@@ -1,5 +1,6 @@
 import { ApiException, fromHono } from "chanfana";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { tasksRouter } from "./endpoints/tasks/router";
 import { ContentfulStatusCode } from "hono/utils/http-status";
 import { DummyEndpoint } from "./endpoints/dummyEndpoint";
@@ -9,6 +10,9 @@ import { SolarProductionForDate, SolarProductionToday } from "./endpoints/solarP
 
 // Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
+
+// Any site can read the API from a browser, but not write to it.
+app.use("*", cors({ origin: "*", allowMethods: ["GET", "HEAD", "OPTIONS"] }));
 
 app.onError((err, c) => {
 	if (err instanceof ApiException) {
