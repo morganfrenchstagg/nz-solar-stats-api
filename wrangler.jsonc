@@ -6,6 +6,10 @@
 	"observability": {
 		"enabled": true
 	},
+	"assets": {
+		// Static pages, e.g. /forecast. Other paths fall through to the Worker.
+		"directory": "./public"
+	},
 	"triggers": {
 		// Daily at 6–7am NZ time, refreshing GXP solar capacity from EMI
 		"crons": ["0 18 * * *"]

@@ -42,6 +42,31 @@ Endpoints:
 
 - `GET /solar-capacity?month=YYYY-MM`: every GXP at a month end (latest by default), with a national total
 - `GET /solar-capacity/{gxp}`: one GXP's monthly history, plus the dispatched farm steps removed from it
+- `GET /solar-production`: a live estimate of every GXP's distributed solar output now, with a 15-minute profile for today (NZ time)
+- `GET /solar-production/{date}`: the same 15-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), from about three months ago to two weeks ahead (as far as Open-Meteo has weather), using capacity as at the last month end on or before that date. Only today has live values.
+
+`/forecast` is a page charting that estimate for NZ or any one GXP, today or yesterday (e.g. `/forecast?gxp=ISL&day=yesterday`). It's a static file in `public/`, served by Workers Static Assets.
+
+The production estimate is a first-cut model that hasn't been backtested. Each GXP's latest distributed capacity is treated as one north-facing array tilted 20°, under [Open-Meteo](https://open-meteo.com/)'s forecast irradiance and temperature at the substation (constants in `src/production/estimate.ts`). Because real roofs face every way, it likely overstates the midday peak on clear days. Weather is cached in D1 per date: today's and future days' are refreshed at most hourly, and a past day's is kept for good once fetched after it ended. That keeps us within Open-Meteo's free limit of 10,000 calls a day, where each GXP counts as one call (about 125 per new date). Responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0.
+
+### Backtesting
+
+`scripts/backtest.ts` compares the production model with metered solar exports for one POC, from EMI's monthly embedded generation files:
+
+```bash
+npm run backtest -- MHO0331 202608_Embedded_generation.csv 202609_Embedded_generation.csv --out mho0331.csv
+```
+
+It runs the same model code as the API, takes capacity from the API (`--api`, default the local dev server) and weather from Open-Meteo for the GXP, and picks out solar retailers as those exporting under 5% of their energy at night. It also breaks results down by sky: each day is classed as cloudy, partly cloudy or sunny by its clearness index (the share of top-of-atmosphere sunlight reaching the ground, below 0.4, 0.4–0.6, or 0.6 and above). Metered injection is what ICPs export after using their own solar, so it sits below modelled generation; the correlations and average-day shape are the fair test. Open-Meteo's forecast API only goes back about three months, so older months can't be backtested this way.
+
+`scripts/backtest-pvoutput.ts` does the same against [PVOutput](https://pvoutput.org/) systems' daily generation, which is gross output rather than exports, so its ratio is a direct check on the model:
+
+```bash
+npm run backtest:pvoutput -- ISL --radius 25
+npm run backtest:pvoutput -- ISL --systems 12345 --from 2026-08-27 --to 2026-10-25
+```
+
+It needs `PVOUTPUT_API_KEY` and `PVOUTPUT_SYSTEM_ID` from your PVOutput Settings page, e.g. in `.env` (gitignored). Searching works with any key, but reading other people's systems needs Donation mode on your account; your own system doesn't. Free keys allow 60 requests an hour (300 with Donation mode), and each system takes about three. Each system is modelled at its own location with the capacity the registry would record: the lower of its panel and inverter ratings.
 
 To run it locally:
 

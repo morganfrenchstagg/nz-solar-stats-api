@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed solar forecast</title>
+<style>
+	:root {
+		color-scheme: light;
+		--page: #f9f9f7;
+		--surface-1: #fcfcfb;
+		--text-primary: #0b0b0b;
+		--text-secondary: #52514e;
+		--text-muted: #898781;
+		--grid: #e1e0d9;
+		--axis: #c3c2b7;
+		--border: rgba(11, 11, 11, 0.10);
+		--series-1: #2a78d6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root {
+			color-scheme: dark;
+			--page: #0d0d0d;
+			--surface-1: #1a1a19;
+			--text-primary: #f0efec;
+			--text-secondary: #c3c2b7;
+			--text-muted: #898781;
+			--grid: #2c2c2a;
+			--axis: #383835;
+			--border: rgba(255, 255, 255, 0.10);
+			--series-1: #3987e5;
+		}
+	}
+
+	[hidden] { display: none !important; }
+	body {
+		margin: 0;
+		background: var(--page);
+		color: var(--text-primary);
+		font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+	}
+	main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+	h1 { font-size: 22px; font-weight: 600; margin: 0; }
+	.subtitle { color: var(--text-secondary); margin: 0 0 20px; }
+	a { color: inherit; }
+
+	.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+	.filters label { color: var(--text-secondary); }
+	.days {
+		display: inline-flex;
+		padding: 2px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--surface-1);
+	}
+	.days button {
+		font: inherit;
+		padding: 4px 12px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+	.days button[aria-pressed="true"] { background: var(--grid); color: var(--text-primary); font-weight: 600; }
+	select {
+		font: inherit;
+		min-width: 0;
+		max-width: 100%;
+		padding: 6px 10px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--surface-1);
+		color: var(--text-primary);
+	}
+
+	.stats {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+		gap: 12px;
+		margin-bottom: 16px;
+	}
+	.stat, .chart {
+		background: var(--surface-1);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+	}
+	.stat { padding: 12px 16px; }
+	.stat-label { color: var(--text-secondary); font-size: 13px; }
+	.stat-value { font-size: 24px; font-weight: 600; }
+	.stat-note { color: var(--text-muted); font-size: 13px; }
+
+	.chart { margin: 0; padding: 16px; transition: opacity 0.2s; }
+	.chart.refreshing { opacity: 0.6; }
+	figcaption { font-weight: 600; margin-bottom: 8px; }
+	.plot { position: relative; outline: none; }
+	.plot:focus-visible { box-shadow: 0 0 0 2px var(--series-1); border-radius: 4px; }
+	.plot svg { display: block; width: 100%; overflow: visible; }
+	.plot text { font-size: 12px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+	.plot .now-label { fill: var(--text-secondary); }
+	.grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+	.baseline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+	.area { fill: var(--series-1); fill-opacity: 0.1; }
+	.line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+	.now-rule { stroke: var(--text-muted); stroke-width: 1; shape-rendering: crispEdges; }
+	.crosshair { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+	.dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+	.hit { fill: transparent; cursor: crosshair; }
+
+	.tooltip {
+		position: absolute;
+		pointer-events: none;
+		padding: 6px 10px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--surface-1);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+		font-size: 13px;
+		white-space: nowrap;
+	}
+	.tooltip strong { display: block; font-size: 15px; }
+	.tooltip span { color: var(--text-secondary); }
+
+	details { margin-top: 12px; }
+	summary { cursor: pointer; color: var(--text-secondary); }
+	.table-wrap { max-height: 320px; overflow-y: auto; margin-top: 8px; }
+	table { border-collapse: collapse; width: 100%; max-width: 360px; font-size: 13px; }
+	th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+	th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-1); }
+	td:last-child, th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+
+	.status { color: var(--text-secondary); }
+	footer { color: var(--text-muted); font-size: 13px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+	<h1>Distributed solar forecast</h1>
+	<p class="subtitle" id="subtitle">Estimated output from solar that isn't in public generation data, per GXP.</p>
+
+	<div class="filters">
+		<label for="gxp">GXP</label>
+		<select id="gxp"><option value="NZ">All of New Zealand</option></select>
+		<div class="days" role="group" aria-label="Day">
+			<button type="button" data-day="today" aria-pressed="true">Today</button>
+			<button type="button" data-day="yesterday" aria-pressed="false">Yesterday</button>
+		</div>
+	</div>
+
+	<p class="status" id="status" role="status">Loading…</p>
+
+	<div class="stats" id="stats" hidden>
+		<div class="stat" id="now-tile"><div class="stat-label">Output now</div><div class="stat-value" id="now-value"></div><div class="stat-note" id="now-note"></div></div>
+		<div class="stat"><div class="stat-label">Peak</div><div class="stat-value" id="peak-value"></div><div class="stat-note" id="peak-note"></div></div>
+		<div class="stat"><div class="stat-label">Energy</div><div class="stat-value" id="energy-value"></div><div class="stat-note">Midnight to midnight</div></div>
+		<div class="stat"><div class="stat-label">Capacity</div><div class="stat-value" id="capacity-value"></div><div class="stat-note" id="capacity-note"></div></div>
+	</div>
+
+	<figure class="chart" id="chart" hidden>
+		<figcaption id="chart-title">Estimated output (MW)</figcaption>
+		<div class="plot" id="plot" tabindex="0" aria-label="Output chart. Use the arrow keys to read values.">
+			<svg id="svg" role="img"></svg>
+			<div class="tooltip" id="tooltip" aria-live="polite" hidden><strong id="tooltip-value"></strong><span id="tooltip-time"></span></div>
+		</div>
+		<details>
+			<summary>Table view</summary>
+			<div class="table-wrap">
+				<table>
+					<thead><tr><th scope="col">Time</th><th scope="col">Output (MW)</th></tr></thead>
+					<tbody id="table-body"></tbody>
+				</table>
+			</div>
+		</details>
+	</figure>
+
+	<footer>
+		<p>
+			A first-cut model that hasn't been backtested: each GXP's distributed solar is treated as one north-facing
+			array tilted 20°, under the 15-minute irradiance and temperature forecast at the substation.
+			Capacities are registry nameplate MW AC, net of dispatched solar farms.
+			Data from the <a href="/">NZ Solar Stats API</a>.
+		</p>
+		<p>Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0).</p>
+	</footer>
+</main>
+
+<script>
+	const API_URL = "/solar-production";
+	const REFRESH_MS = 5 * 60 * 1000;
+	const INTERVAL_MS = 15 * 60 * 1000;
+	const SVG_NS = "http://www.w3.org/2000/svg";
+	const NZ = "Pacific/Auckland";
+
+	const timeFormat = new Intl.DateTimeFormat("en-NZ", { timeZone: NZ, hour: "numeric", minute: "2-digit" });
+	const hourFormat = new Intl.DateTimeFormat("en-NZ", { timeZone: NZ, hour: "numeric" });
+	// Dates (YYYY-MM-DD) are formatted as UTC so they aren't shifted a day.
+	const dateFormat = new Intl.DateTimeFormat("en-NZ", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
+	const monthEndFormat = new Intl.DateTimeFormat("en-NZ", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" });
+
+	const select = document.getElementById("gxp");
+	const dayButtons = document.querySelectorAll(".days button");
+	const plot = document.getElementById("plot");
+	const svg = document.getElementById("svg");
+	const tooltip = document.getElementById("tooltip");
+
+	// The selection lives in the URL, e.g. ?gxp=ISL&day=yesterday, so it can be shared.
+	const params = new URLSearchParams(location.search);
+	let gxp = params.get("gxp") || "NZ";
+	let day = params.get("day") === "yesterday" ? "yesterday" : "today";
+
+	let data = null;
+	let times = [];
+	let chart = null; // scales and series of the current render, for hover
+	let hoverIndex = null;
+	let latestLoad = 0;
+
+	function formatMw(mw) {
+		const digits = mw >= 100 ? 0 : mw >= 1 ? 1 : 2;
+		return mw.toLocaleString("en-NZ", { maximumFractionDigits: digits }) + " MW";
+	}
+
+	function selectedSeries() {
+		const gxp = data.gxps.find((g) => g.gxp === select.value);
+		if (gxp) return { label: gxp.name + " (" + gxp.gxp + ")", ...gxp };
+		return { label: "All of New Zealand", ...data.total };
+	}
+
+	async function load() {
+		// Switching day while a load is in flight must not let the older one win.
+		const thisLoad = ++latestLoad;
+		document.getElementById("chart").classList.add("refreshing");
+		try {
+			const res = await fetch(API_URL + "/" + day);
+			const body = await res.json();
+			if (thisLoad !== latestLoad) return;
+			if (!res.ok) throw new Error((body.errors && body.errors[0] && body.errors[0].message) || "HTTP " + res.status);
+			data = body.result;
+			times = data.profileTimes.map((time) => Date.parse(time));
+			fillOptions();
+			render();
+			setStatus("");
+		} catch (error) {
+			// Keep showing the last good render if there is one.
+			if (thisLoad === latestLoad) setStatus("Couldn't load the forecast: " + error.message);
+		} finally {
+			if (thisLoad === latestLoad) document.getElementById("chart").classList.remove("refreshing");
+		}
+	}
+
+	function updateUrl() {
+		const query = new URLSearchParams();
+		if (gxp !== "NZ") query.set("gxp", gxp);
+		if (day !== "today") query.set("day", day);
+		const search = query.toString();
+		history.replaceState(null, "", location.pathname + (search ? "?" + search : ""));
+	}
+
+	function syncDayButtons() {
+		for (const button of dayButtons) button.setAttribute("aria-pressed", String(button.dataset.day === day));
+	}
+
+	function setStatus(message) {
+		const status = document.getElementById("status");
+		status.textContent = message;
+		status.hidden = message === "";
+	}
+
+	function fillOptions() {
+		const gxps = [...data.gxps].sort((a, b) => a.name.localeCompare(b.name));
+		select.replaceChildren(new Option("All of New Zealand", "NZ"));
+		for (const option of gxps) {
+			select.add(new Option(option.name + " (" + option.gxp + ") · " + formatMw(option.distributedMw), option.gxp));
+		}
+		select.value = gxps.some((option) => option.gxp === gxp) ? gxp : "NZ";
+		gxp = select.value;
+	}
+
+	function render() {
+		const series = selectedSeries();
+		const profile = series.profileMw;
+		const peakIndex = profile.reduce((best, mw, index) => (mw > profile[best] ? index : best), 0);
+		const energyMwh = profile.reduce((sum, mw) => sum + mw, 0) * (INTERVAL_MS / 3600000);
+		const estimatedAt = Date.parse(data.time);
+		// Only today has a live value; a past day is shown whole.
+		const isLive = series.productionMw !== null;
+		const date = dateFormat.format(Date.parse(data.date + "T12:00:00Z"));
+
+		document.getElementById("subtitle").textContent =
+			date + (isLive ? " · estimated at " + timeFormat.format(estimatedAt) : " · whole day");
+		document.getElementById("now-tile").hidden = !isLive;
+		if (isLive) {
+			document.getElementById("now-value").textContent = formatMw(series.productionMw);
+			document.getElementById("now-note").textContent =
+				Math.round((series.productionMw / series.distributedMw) * 100) + "% of capacity";
+		}
+		document.getElementById("peak-value").textContent = formatMw(profile[peakIndex]);
+		document.getElementById("peak-note").textContent = profile[peakIndex] > 0 ? "At " + timeFormat.format(times[peakIndex]) : "No sun forecast";
+		document.getElementById("energy-value").textContent =
+			energyMwh >= 1000
+				? (energyMwh / 1000).toLocaleString("en-NZ", { maximumFractionDigits: 1 }) + " GWh"
+				: energyMwh.toLocaleString("en-NZ", { maximumFractionDigits: energyMwh >= 100 ? 0 : 1 }) + " MWh";
+		document.getElementById("capacity-value").textContent = formatMw(series.distributedMw);
+		document.getElementById("capacity-note").textContent =
+			"Distributed, as at " + monthEndFormat.format(Date.parse(data.capacityMonthEnd + "T00:00:00Z"));
+		document.getElementById("chart-title").textContent = "Estimated output, " + series.label + " (MW)";
+		document.getElementById("stats").hidden = false;
+		document.getElementById("chart").hidden = false;
+
+		renderTable(profile);
+		renderChart(series, peakIndex, estimatedAt);
+	}
+
+	function renderTable(profile) {
+		const body = document.getElementById("table-body");
+		body.replaceChildren();
+		profile.forEach((mw, index) => {
+			const row = body.insertRow();
+			row.insertCell().textContent = timeFormat.format(times[index]);
+			row.insertCell().textContent = mw.toLocaleString("en-NZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+		});
+	}
+
+	function niceStep(max, count) {
+		const raw = max / count;
+		const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+		return [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((step) => step >= raw);
+	}
+
+	function el(tag, attributes, parent) {
+		const node = document.createElementNS(SVG_NS, tag);
+		for (const name in attributes) node.setAttribute(name, attributes[name]);
+		parent.appendChild(node);
+		return node;
+	}
+
+	function renderChart(series, peakIndex, estimatedAt) {
+		const width = plot.clientWidth;
+		const margin = { top: 24, right: 12, bottom: 28, left: 52 };
+		const plotHeight = 240;
+		const height = margin.top + plotHeight + margin.bottom;
+		const start = times[0];
+		const end = times[times.length - 1] + INTERVAL_MS;
+		// The y-axis runs to the GXP's capacity, so the curve shows how hard it's working.
+		const step = niceStep(series.distributedMw, 4);
+		const ticks = Math.ceil(series.distributedMw / step - 1e-9);
+		const yMax = step * ticks;
+		const x = (time) => margin.left + ((time - start) / (end - start)) * (width - margin.left - margin.right);
+		const y = (mw) => margin.top + plotHeight - (mw / yMax) * plotHeight;
+
+		svg.replaceChildren();
+		svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+		svg.setAttribute("height", height);
+		svg.setAttribute(
+			"aria-label",
+			series.label + ": estimated output peaks at " + formatMw(series.profileMw[peakIndex]) +
+				" at " + timeFormat.format(times[peakIndex]) + ". Full values are in the table view.",
+		);
+
+		for (let i = 0; i <= ticks; i++) {
+			const mw = step * i;
+			el("line", { class: i === 0 ? "baseline" : "grid", x1: margin.left, x2: width - margin.right, y1: y(mw), y2: y(mw) }, svg);
+			const label = el("text", { x: margin.left - 8, y: y(mw), "text-anchor": "end", "dominant-baseline": "middle" }, svg);
+			label.textContent = mw.toLocaleString("en-NZ", { maximumFractionDigits: 3 });
+		}
+
+		const hoursPerTick = width < 480 ? 6 : 3;
+		for (let time = start; time <= end; time += hoursPerTick * 3600000) {
+			const anchor = time === start ? "start" : time + hoursPerTick * 3600000 > end ? "end" : "middle";
+			const label = el("text", { x: x(time), y: margin.top + plotHeight + 18, "text-anchor": anchor }, svg);
+			label.textContent = hourFormat.format(time);
+		}
+
+		const points = series.profileMw.map((mw, index) => x(times[index]) + "," + y(mw));
+		el("path", { class: "area", d: "M" + x(start) + "," + y(0) + "L" + points.join("L") + "L" + x(times[times.length - 1]) + "," + y(0) + "Z" }, svg);
+		el("path", { class: "line", d: "M" + points.join("L") }, svg);
+
+		if (series.productionMw !== null && estimatedAt >= start && estimatedAt <= end) {
+			el("line", { class: "now-rule", x1: x(estimatedAt), x2: x(estimatedAt), y1: margin.top - 6, y2: y(0) }, svg);
+			const label = el("text", { class: "now-label", x: x(estimatedAt), y: margin.top - 10, "text-anchor": "middle" }, svg);
+			label.textContent = "Now";
+			el("circle", { class: "dot", cx: x(estimatedAt), cy: y(series.productionMw), r: 4 }, svg);
+		}
+
+		const crosshair = el("line", { class: "crosshair", y1: margin.top, y2: y(0), visibility: "hidden" }, svg);
+		const hoverDot = el("circle", { class: "dot", r: 4, visibility: "hidden" }, svg);
+		const hit = el("rect", { class: "hit", x: margin.left, y: 0, width: width - margin.left - margin.right, height: margin.top + plotHeight }, svg);
+		hit.addEventListener("pointermove", (event) => {
+			const bounds = svg.getBoundingClientRect();
+			const time = start + ((event.clientX - bounds.left - margin.left) / (width - margin.left - margin.right)) * (end - start);
+			showPoint(Math.round((time - start) / INTERVAL_MS));
+		});
+		hit.addEventListener("pointerleave", hidePoint);
+
+		chart = { series, x, y, crosshair, hoverDot, width, estimatedAt, peakIndex };
+		if (hoverIndex !== null) showPoint(hoverIndex);
+	}
+
+	function showPoint(index) {
+		const { series, x, y, crosshair, hoverDot, width } = chart;
+		hoverIndex = Math.max(0, Math.min(times.length - 1, index));
+		const mw = series.profileMw[hoverIndex];
+		const px = x(times[hoverIndex]);
+		crosshair.setAttribute("x1", px);
+		crosshair.setAttribute("x2", px);
+		crosshair.setAttribute("visibility", "visible");
+		hoverDot.setAttribute("cx", px);
+		hoverDot.setAttribute("cy", y(mw));
+		hoverDot.setAttribute("visibility", "visible");
+
+		document.getElementById("tooltip-value").textContent = formatMw(mw);
+		document.getElementById("tooltip-time").textContent = timeFormat.format(times[hoverIndex]);
+		tooltip.hidden = false;
+		const left = px + 12 + tooltip.offsetWidth > width ? px - 12 - tooltip.offsetWidth : px + 12;
+		tooltip.style.left = left + "px";
+		tooltip.style.top = Math.max(0, y(mw) - tooltip.offsetHeight - 8) + "px";
+	}
+
+	function hidePoint() {
+		hoverIndex = null;
+		tooltip.hidden = true;
+		if (!chart) return;
+		chart.crosshair.setAttribute("visibility", "hidden");
+		chart.hoverDot.setAttribute("visibility", "hidden");
+	}
+
+	plot.addEventListener("focus", () => {
+		if (!chart) return;
+		const nowIndex = Math.floor((chart.estimatedAt - times[0]) / INTERVAL_MS);
+		showPoint(nowIndex >= 0 && nowIndex < times.length ? nowIndex : chart.peakIndex);
+	});
+	plot.addEventListener("blur", hidePoint);
+	plot.addEventListener("keydown", (event) => {
+		if (hoverIndex === null) return;
+		// Shift moves an hour at a time.
+		const stride = event.shiftKey ? 4 : 1;
+		if (event.key === "ArrowLeft") showPoint(hoverIndex - stride);
+		else if (event.key === "ArrowRight") showPoint(hoverIndex + stride);
+		else if (event.key === "Escape") hidePoint();
+		else return;
+		event.preventDefault();
+	});
+
+	select.addEventListener("change", () => {
+		gxp = select.value;
+		updateUrl();
+		hidePoint();
+		render();
+	});
+	for (const button of dayButtons) {
+		button.addEventListener("click", () => {
+			if (button.dataset.day === day) return;
+			day = button.dataset.day;
+			syncDayButtons();
+			updateUrl();
+			hidePoint();
+			load();
+		});
+	}
+	let resizeFrame = 0;
+	window.addEventListener("resize", () => {
+		cancelAnimationFrame(resizeFrame);
+		resizeFrame = requestAnimationFrame(() => data && render());
+	});
+
+	syncDayButtons();
+	load();
+	setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>

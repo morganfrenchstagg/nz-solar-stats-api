@@ -5,6 +5,7 @@ import { ContentfulStatusCode } from "hono/utils/http-status";
 import { DummyEndpoint } from "./endpoints/dummyEndpoint";
 import { runCapacityJob } from "./capacity/job";
 import { solarCapacityRouter } from "./endpoints/solarCapacity/router";
+import { SolarProductionForDate, SolarProductionToday } from "./endpoints/solarProduction";
 
 // Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
@@ -44,6 +45,8 @@ const openapi = fromHono(app, {
 });
 
 openapi.route("/solar-capacity", solarCapacityRouter);
+openapi.get("/solar-production", SolarProductionToday);
+openapi.get("/solar-production/:date", SolarProductionForDate);
 
 // Register Tasks Sub router
 openapi.route("/tasks", tasksRouter);

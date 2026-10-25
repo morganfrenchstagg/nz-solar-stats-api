@@ -31,6 +31,8 @@
 	},
 	"private": true,
 	"scripts": {
+		"backtest": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/backtest.ts",
+		"backtest:pvoutput": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --env-file-if-exists=.env scripts/backtest-pvoutput.ts",
 		"cf-typegen": "wrangler types",
 		"deploy": "wrangler deploy",
 		"dev": "pnpm seedLocalDb && wrangler dev",
