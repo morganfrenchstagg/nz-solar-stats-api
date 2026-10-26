@@ -275,14 +275,22 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 				hourly: Object.values(OPEN_METEO_VARIABLES).join(","),
 				temporal_resolution: "native",
 				models: "jma_jaxa_himawari",
-				...sharedParams(date),
+				// The archive takes no date after today's in UTC, which until
+				// midday in NZ is still yesterday, so it's asked for the UTC days
+				// the NZ day spans and cut down to it.
+				start_date: previousDate(date),
+				end_date: [date, now.toISOString().slice(0, 10)].sort()[0],
+				timeformat: "unixtime",
 			})}`,
 		);
 		if (!res.ok) throw new WeatherFetchError(`Open-Meteo satellite request failed (${res.status}): ${await res.text()}`);
 		const body = await res.json<OpenMeteoSatellite | OpenMeteoSatellite[]>();
 		readings.push(...(Array.isArray(body) ? body : [body]));
 	}
-	if (readings.every(({ hourly }) => hourly[OPEN_METEO_VARIABLES.ghiWm2].every((value) => value === null))) {
+	const times = readings[0].hourly.time.map((seconds) => seconds * 1000);
+	const onDay = times.map((time) => nzDate(new Date(time)) === date);
+	const ofDay = <T>(values: T[]) => values.filter((_, i) => onDay[i]);
+	if (readings.every(({ hourly }) => ofDay(hourly[OPEN_METEO_VARIABLES.ghiWm2]).every((value) => value === null))) {
 		throw new WeatherFetchError("every reading was empty");
 	}
 
@@ -290,13 +298,13 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		format: CACHE_FORMAT,
 		date,
 		fetchedAt: now.toISOString(),
-		times: readings[0].hourly.time.map((seconds) => seconds * 1000),
+		times: ofDay(times),
 		locations: Object.fromEntries(
 			locations.map(({ id }) => {
 				const own = pixels.map((pixel, i) => [pixel, readings[i]] as const).filter(([pixel]) => pixel.id === id);
 				const average = (component: Component) =>
 					averagePixels(
-						own.map(([, { hourly }]) => hourly[OPEN_METEO_VARIABLES[component]]),
+						own.map(([, { hourly }]) => ofDay(hourly[OPEN_METEO_VARIABLES[component]])),
 						own.map(([pixel]) => pixel.weight),
 					);
 				return [id, { ghiWm2: average("ghiWm2"), dniWm2: average("dniWm2"), dhiWm2: average("dhiWm2") }];
