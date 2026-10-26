@@ -106,8 +106,8 @@ const series: Record<string, [string, number, number, number | null][]> = {
 		["2026-05-31", 757, 57.804, 1000.734],
 		["2026-06-30", 770, 57.998, 14.883],
 	],
-	// Tauhei is connected straight to the grid at WHU 110 kV, so isn't in EMI.
-	// The May 2026 step is a smaller farm on the distribution network.
+	// Tauhei is connected straight to the grid at WHU 110 kV, but part of it
+	// shows up here and at Piako the month it was commissioned (May 2026).
 	WHU0331POCOGN: [
 		["2026-01-31", 258, 3.923, 50.0],
 		["2026-02-28", 264, 4.053, 21.53],
@@ -118,6 +118,17 @@ const series: Record<string, [string, number, number, number | null][]> = {
 		["2026-07-31", 291, 8.644, 8.8],
 		["2026-08-31", 294, 8.689, 8.233],
 		["2026-09-30", 301, 8.819, 18.569],
+	],
+	PAO1101POCOGN: [
+		["2026-01-31", 307, 2.527, 20.618],
+		["2026-02-28", 310, 2.667, 46.633],
+		["2026-03-31", 315, 2.712, 9.048],
+		["2026-04-30", 316, 2.727, 9.99],
+		["2026-05-31", 332, 20.709, 568.534],
+		["2026-06-30", 335, 20.742, 11.0],
+		["2026-07-31", 343, 20.967, 28.091],
+		["2026-08-31", 350, 21.014, 6.799],
+		["2026-09-30", 360, 21.229, 21.443],
 	],
 };
 

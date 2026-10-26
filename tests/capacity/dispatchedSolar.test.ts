@@ -12,49 +12,62 @@ const kowhaiPark: SolarFarm = {
 	name: "Kōwhai Park",
 	capacityMw: 150,
 	commissioned: "2026-08-13T02:00:00.000Z",
+	location: null,
 };
 const taiohi: SolarFarm = {
 	node: "HLY0331 TOH0",
 	name: "Taiohi",
 	capacityMw: 22.51,
 	commissioned: "2025-09-15T01:00:00.000Z",
+	location: null,
 };
 const tePunaMauri: SolarFarm = {
 	node: "MTO0331 RWI0",
 	name: "Te Puna Mauri ō Omaru",
 	capacityMw: 16.23,
 	commissioned: "2024-12-12T18:20:00.000Z",
+	location: null,
 };
 const papareireia: SolarFarm = {
 	node: "MTO0331 GDS0",
 	name: "Papareireiā",
 	capacityMw: 18,
 	commissioned: "2025-11-12T21:30:00.000Z",
+	location: null,
 };
 const lauriston: SolarFarm = {
 	node: "ASB0661 LAU0",
 	name: "Lauriston",
 	capacityMw: 47.24,
 	commissioned: "2024-10-15T21:20:00.000Z",
+	location: null,
 };
 const rangitaiki: SolarFarm = {
 	node: "EDG0331 RGT0",
 	name: "Rangitaiki",
 	capacityMw: 23.76,
 	commissioned: "2024-03-06T18:15:00.000Z",
+	location: null,
 };
 const omeheu: SolarFarm = {
 	node: "EDG0331 EDS0",
 	name: "Omeheu",
 	capacityMw: 28.7,
 	commissioned: "2026-05-19T05:50:00.000Z",
+	location: null,
 };
 const tauhei: SolarFarm = {
 	node: "WHU1101 TAH0",
 	name: "Tauhei",
 	capacityMw: 150,
 	commissioned: "2026-05-01T01:15:00.000Z",
+	location: { lat: -37.5802, long: 175.7122 },
 };
+
+const substations = [
+	{ siteId: "PAO", lat: -37.6507, long: 175.5608 },
+	{ siteId: "WHU", lat: -37.5692, long: 175.6832 },
+];
 
 // [name or NSP, month end, MW to 1dp], to keep expectations readable.
 function summarise(steps: (CapacityStep & { name?: string })[]) {
@@ -134,9 +147,22 @@ describe("attributeStepsToFarms", () => {
 		]);
 	});
 
-	it("doesn't claim a smaller farm at the GXP for a grid-connected farm", () => {
-		const steps = findCapacitySteps(emiRows("WHU0331POCOGN"));
-		expect(summarise(steps)).toEqual([["WHU0331POCOGN", "2026-05-31", 4.3]]);
+	it("claims steps at nearby NSPs the month a grid-connected farm is commissioned", () => {
+		const steps = findCapacitySteps([...emiRows("WHU0331POCOGN"), ...emiRows("PAO1101POCOGN")]);
+		expect(summarise(attributeStepsToFarms(steps, [tauhei], substations))).toEqual([
+			["Tauhei", "2026-05-31", 4.3],
+			// 17.8 MW with the full history's typical rooftop; these months alone give 17.7.
+			["Tauhei", "2026-05-31", 17.7],
+		]);
+	});
+
+	it("leaves a grid-connected farm's neighbours alone outside its commissioning month or 20 km", () => {
+		const steps = findCapacitySteps([...emiRows("WHU0331POCOGN"), ...emiRows("PAO1101POCOGN")]);
+		const earlier = { ...tauhei, commissioned: "2026-03-01T00:00:00.000Z" };
+		const atHuntly = { ...tauhei, location: { lat: -37.5417, long: 175.1518 } };
+		expect(attributeStepsToFarms(steps, [earlier], substations)).toEqual([]);
+		expect(attributeStepsToFarms(steps, [atHuntly], substations)).toEqual([]);
+		// Nor without knowing where the GXPs are.
 		expect(attributeStepsToFarms(steps, [tauhei])).toEqual([]);
 	});
 });

@@ -50,11 +50,11 @@ const generators = [
 	},
 ];
 
-function mockSources(csv = emiCsv, generatorList = generators) {
+function mockSources(csv = emiCsv, generatorList: unknown[] = generators, substationList = substations) {
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		const url = String(input instanceof Request ? input.url : input);
 		if (url.startsWith("https://www.emi.ea.govt.nz/")) return new Response(csv);
-		if (url.endsWith("/v1/substations")) return Response.json(substations);
+		if (url.endsWith("/v1/substations")) return Response.json(substationList);
 		if (url.endsWith("/v1/generators")) return Response.json(generatorList);
 		return new Response("Not found", { status: 404 });
 	});
@@ -120,6 +120,47 @@ describe("runCapacityJob", () => {
 			{ month_end: "2026-07-31", dispatched_mw: 0, step_mw: 160.117 },
 			{ month_end: "2026-08-31", dispatched_mw: 0, step_mw: 0 },
 			{ month_end: "2026-09-30", dispatched_mw: 0, step_mw: 0 },
+		]);
+	});
+
+	it("takes a grid-connected farm's steps at nearby NSPs out of distributed solar", async () => {
+		// Tauhei, commissioned in May 2026 at Waihou 110 kV, also turned up in the
+		// registry at Piako and Waihou's 33 kV NSP that month.
+		const csv = [
+			...emiCsv.split("\r\n").slice(0, 13),
+			"31/03/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),315,4.71134,2.712,8.609,5,9.048",
+			"31/03/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),269,3.85111,4.098,15.233,5,9.040",
+			"30/04/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),316,4.71360,2.727,8.631,1,9.990",
+			"30/04/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),276,3.95529,4.171,15.112,7,8.869",
+			"31/05/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),332,4.94121,20.709,62.376,16,568.534",
+			"31/05/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),281,4.01888,8.562,30.470,5,878.196",
+			"",
+		].join("\r\n");
+		const tauhei = {
+			site: "TAH",
+			name: "Tauhei",
+			location: { lat: -37.5802, long: 175.7122 },
+			units: [{ name: "Tauhei", unitCode: "TAH0", node: "WHU1101 TAH0", capacity: 150, fuel: "Solar", fuelCode: "SOL", commissioned: "2026-05-01T01:15:00.000Z" }],
+		};
+		mockSources(csv, [tauhei], [
+			{ long: 175.5608, lat: -37.6507, siteId: "PAO", description: "Piako", type: "ACSTN", gridZone: 4, island: "north" },
+			{ long: 175.6832, lat: -37.5692, siteId: "WHU", description: "Waihou", type: "ACSTN", gridZone: 4, island: "north" },
+		]);
+		const result = await runCapacityJob(env, now);
+
+		expect(result.farmsNotInEmi).toEqual([]);
+		const steps = await env.DB.prepare("SELECT nsp, month_end, round(mw, 1) AS mw FROM dispatched_solar_steps ORDER BY nsp").all();
+		expect(steps.results).toEqual([
+			{ nsp: "PAO1101POCOGN", month_end: "2026-05-31", mw: 17.8 },
+			{ nsp: "WHU0331POCOGN", month_end: "2026-05-31", mw: 4.3 },
+		]);
+		const may = await env.DB.prepare(
+			"SELECT gxp, round(distributed_mw, 3) AS distributed, step_mw FROM solar_capacity WHERE month_end = '2026-05-31' ORDER BY gxp",
+		).all();
+		// What's left is April's rooftops plus May's new ones.
+		expect(may.results).toEqual([
+			{ gxp: "PAO", distributed: 2.879, step_mw: 0 },
+			{ gxp: "WHU", distributed: 4.216, step_mw: 0 },
 		]);
 	});
 

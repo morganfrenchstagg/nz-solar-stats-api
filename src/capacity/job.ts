@@ -48,7 +48,7 @@ export async function runCapacityJob(
 	}
 
 	const steps = findCapacitySteps(emiRows);
-	const farmSteps = attributeStepsToFarms(steps, farms);
+	const farmSteps = attributeStepsToFarms(steps, farms, substations);
 	// Farm-sized steps that aren't dispatched farms stay in distributed_mw,
 	// but are kept apart so they aren't mistaken for steady growth.
 	const otherSteps = steps.filter(

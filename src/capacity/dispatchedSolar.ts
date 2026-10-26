@@ -1,4 +1,4 @@
-import type { SolarFarm } from "./electricityMap";
+import type { SolarFarm, Substation } from "./electricityMap";
 import type { EmiSolarRow } from "./emi";
 
 // A month where an NSP's installed solar grew by more than its new rooftop
@@ -32,6 +32,13 @@ const MAX_MATCH = 1.25;
 // stage is always a substantial part of the farm.
 const MIN_FIRST_STAGE = 0.3;
 const MAX_STAGE_SPREAD_MONTHS = 12;
+// A farm connected straight to the grid has no NSP of its own, but some of it
+// can still turn up in the registry at NSPs nearby the month it's
+// commissioned: Tauhei (150 MW at Waihou, May 2026) as 17.8 MW at Piako and
+// 4.3 MW at Waihou. Grid load at both showed little of the solar those steps
+// would add as local generation (about half at Piako), so they're the farm's.
+const NEARBY_KM = 20;
+const NEARBY_MONTHS = 1;
 
 export function findCapacitySteps(rows: EmiSolarRow[]): CapacityStep[] {
 	const firstMonthEnd = rows.reduce(
@@ -64,10 +71,12 @@ export function findCapacitySteps(rows: EmiSolarRow[]): CapacityStep[] {
 }
 
 // Works out which capacity steps are dispatched solar farms. Farms connected
-// straight to the grid have no NSP in EMI and get no steps.
+// straight to the grid have no NSP in EMI, so only get steps at NSPs nearby
+// (see NEARBY_KM).
 export function attributeStepsToFarms(
 	steps: CapacityStep[],
 	farms: SolarFarm[],
+	substations: Pick<Substation, "siteId" | "lat" | "long">[] = [],
 ): FarmStep[] {
 	const unclaimed = [...steps].sort((a, b) => a.monthEnd.localeCompare(b.monthEnd));
 	const claimed: FarmStep[] = [];
@@ -90,7 +99,13 @@ export function attributeStepsToFarms(
 		const first = candidates.find(
 			(step) => step.mw >= farm.capacityMw * MIN_FIRST_STAGE && step.mw <= max,
 		);
-		if (!first) continue;
+		if (!first) {
+			for (const step of nearbySteps(farm, unclaimed, substations)) {
+				unclaimed.splice(unclaimed.indexOf(step), 1);
+				claimed.push({ ...step, node: farm.node, name: farm.name });
+			}
+			continue;
+		}
 
 		// Later stages only count until the farm's capacity is accounted for, so a
 		// separate system arriving soon after (Lauriston, December 2024) isn't taken.
@@ -112,6 +127,37 @@ export function attributeStepsToFarms(
 		}
 	}
 	return claimed.sort((a, b) => a.monthEnd.localeCompare(b.monthEnd));
+}
+
+// Steps at NSPs whose GXP is near a farm, the month it was commissioned or the
+// next, up to the farm's capacity.
+function nearbySteps(
+	farm: SolarFarm,
+	steps: CapacityStep[],
+	substations: Pick<Substation, "siteId" | "lat" | "long">[],
+): CapacityStep[] {
+	const { commissioned, location } = farm;
+	if (!commissioned || !location) return [];
+	const nearby: CapacityStep[] = [];
+	let total = 0;
+	for (const step of steps) {
+		const monthsAfter = monthIndex(step.monthEnd) - monthIndex(commissioned);
+		const substation = substations.find((s) => s.siteId === step.nsp.slice(0, 3));
+		if (monthsAfter < 0 || monthsAfter > NEARBY_MONTHS || !substation) continue;
+		if (distanceKm(location, substation) > NEARBY_KM) continue;
+		if (total + step.mw > farm.capacityMw * MAX_MATCH) continue;
+		nearby.push(step);
+		total += step.mw;
+	}
+	return nearby;
+}
+
+function distanceKm(a: { lat: number; long: number }, b: { lat: number; long: number }): number {
+	const radians = (degrees: number) => (degrees * Math.PI) / 180;
+	const h =
+		Math.sin(radians(b.lat - a.lat) / 2) ** 2 +
+		Math.cos(radians(a.lat)) * Math.cos(radians(b.lat)) * Math.sin(radians(b.long - a.long) / 2) ** 2;
+	return 2 * 6371 * Math.asin(Math.sqrt(h));
 }
 
 function groupByNsp(rows: EmiSolarRow[]): EmiSolarRow[][] {

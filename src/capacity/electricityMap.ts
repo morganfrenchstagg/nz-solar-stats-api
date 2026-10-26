@@ -14,9 +14,11 @@ export interface SolarFarm {
 	name: string;
 	capacityMw: number;
 	commissioned: string | null;
+	location: { lat: number; long: number } | null;
 }
 
 interface Generator {
+	location?: { lat: number; long: number };
 	units: {
 		name: string;
 		node: string;
@@ -41,6 +43,7 @@ export async function fetchDispatchedSolarFarms(): Promise<SolarFarm[]> {
 				name: unit.name,
 				capacityMw: unit.capacity,
 				commissioned: unit.commissioned ?? null,
+				location: generator.location ?? null,
 			})),
 	);
 }
