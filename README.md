@@ -49,18 +49,27 @@ EMI only publishes month-end snapshots, a few weeks after each month. So each GX
 
 `/forecast` is a page charting that estimate for NZ or any one GXP, today or yesterday (e.g. `/forecast?gxp=ISL&day=yesterday`). It's a static file in `public/`, served by Workers Static Assets.
 
-The production estimate is a first-cut model. Each GXP's latest distributed capacity is treated as one north-facing array tilted 20° (constants in `src/production/estimate.ts`). Because real roofs face every way, it likely overstates the midday peak on clear days.
+The production model (`src/production/estimate.ts`) splits each GXP's capacity in two:
+
+- **Rooftops**, as arrays tilted 20° facing the ways PVOutput's NZ rooftop capacity does: 61% north, 9.5% each north-east and north-west, and 10% each east and west. Each has panels 1.15 times its registry capacity and 85% efficiency in full sun, falling in dim light by 0.08 × ln(1000 / irradiance) (13% lower at 200 W/m²).
+- **Farms**: every farm-sized step in its capacity (`step_mw`, such as Rānui's 11 MW at Blenheim) as one fixed array facing north at 25°, with panels 1.3 times capacity, 88% efficiency and no dim-light loss. Blenheim has 24 MW of these steps, of 41 MW.
+
+Both lose 0.4% of output per °C of cell heating. The light on each array is worked out from direct and diffuse sunlight with the Hay–Davies model (`src/production/solar.ts`), which comes within 1.5% of Open-Meteo's own tilted irradiance over a week, facing north, east, west or north-east.
+
+The rooftop constants were fitted in October 2026 to 53 NZ rooftop systems on PVOutput, over 27 July – 25 October. PVOutput hides other people's locations, so each system was placed at the GXP whose satellite irradiance best tracked its day-to-day output; this agreed with every system named after a place. The first version of the model (all one north-facing array, 1.2 DC:AC, 83% efficiency, no dim-light loss) came out high: the systems' actual output was 0.91 of it overall, 0.88 on cloudy days and 0.92 on sunny ones. This version's ratio is 1.00 overall, 1.02 on cloudy days and 1.00 on sunny ones; the middle half of systems range from 0.89 to 1.08. East- and west-facing systems come in at 0.92 and north-facing ones at 1.02, since the mix is a fleet average. Rānui's own 15-minute output (22–25 October) fits the farm array much better than the rooftop mix: correlation 0.987 against 0.971, and 7.5% shape error against 11.2%. A tracker fits worse than either (r 0.86).
+
+Dispatched solar farms modelled as the farm array come out at 0.67–1.04 of the model, depending on their layout. They come out about even across skies, at 1.06 on cloudy days and 1.00 on sunny ones (against each farm's own average), so farms don't share the rooftops' dim-light loss. At MHO0331, rooftop exports on cloudy days came to 0.40 of the model's generation, against 0.36 on sunny days, though self-consumption muddies that.
 
 Weather is taken where each GXP's customers live, not at its substation, which can be well out of town (Mangahao's sits in the Tararua foothills, 13 km from Levin). `npm run gxp-locations` builds `src/production/gxpLocations.json` from [Kontur](https://www.kontur.io/portfolio/population-dataset/)'s 400 m population grid, assigning each hexagon to its nearest GXP: each GXP's population-weighted centre and its five most-populated satellite pixels. Rerun it when GXPs change; a GXP missing from it falls back to its substation.
 
-Irradiance comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`):
+Sunlight (global horizontal, direct normal and diffuse) comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`), each component blended separately:
 
 - For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, about half an hour behind. GXPs of 5 MW or more average their five most-populated pixels, weighted by population; smaller ones use their most-populated pixel.
 - After the latest reading, the 15-minute forecast. How cloudy the last reading was compared with the forecast fades out over two hours, so the two don't jump apart.
 
 The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 
-Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
+Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good, unless it was cached in an older format (`CACHE_FORMAT` in `src/production/weather.ts`), when it's fetched again once. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
 
 ### Backtesting
 

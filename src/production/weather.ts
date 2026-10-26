@@ -1,5 +1,4 @@
 import { averagePixels, blendIrradiance, type WeatherPoints } from "./blend";
-import { PANEL_AZIMUTH_DEGREES, PANEL_TILT_DEGREES } from "./estimate";
 
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archive";
@@ -14,6 +13,16 @@ const MAX_SATELLITE_AGE_MS = 60 * 60 * 1000;
 const SATELLITE_DELAY_MS = 60 * 60 * 1000;
 // Keeps request URLs to a sensible length.
 const LOCATIONS_PER_REQUEST = 100;
+// Bumped when what's cached changes shape, so older copies are fetched again.
+const CACHE_FORMAT = 2;
+// Sunlight on flat ground, straight from the sun and from the rest of the sky.
+// Three variables and the temperature still count as one Open-Meteo call.
+const COMPONENTS = ["ghiWm2", "dniWm2", "dhiWm2"] as const;
+const OPEN_METEO_VARIABLES = {
+	ghiWm2: "shortwave_radiation_instant",
+	dniWm2: "direct_normal_irradiance_instant",
+	dhiWm2: "diffuse_radiation_instant",
+} as const;
 
 // Open-Meteo only has weather from about three months ago to two weeks ahead.
 export class WeatherUnavailableError extends Error {}
@@ -26,36 +35,45 @@ export interface WeatherLocation extends WeatherPoints {
 	id: string;
 }
 
+type Component = (typeof COMPONENTS)[number];
+
+// A location's 15-minute weather: sunlight in each component and the air
+// temperature, at a point whose sun position the tilt maths uses.
+export interface LocationWeather extends Record<Component, number[]> {
+	lat: number;
+	long: number;
+	temperatureC: number[];
+}
+
 // A day's 15-minute weather at each location.
 export interface DayWeather {
 	date: string; // NZ date, YYYY-MM-DD
 	fetchedAt: string;
 	times: number[]; // epoch milliseconds
-	locations: Record<string, { irradianceWm2: number[]; temperatureC: number[] }>;
+	locations: Record<string, LocationWeather>;
 	// Irradiance up to here is from the satellite, after it the forecast.
 	observedUntil: number | null;
 }
 
-type Forecast = Omit<DayWeather, "observedUntil">;
+type Forecast = Omit<DayWeather, "observedUntil"> & { format: number };
 
 // Each location's satellite irradiance, averaged over its pixels, every 10 minutes.
 interface SatelliteDay {
+	format: number;
 	date: string;
 	fetchedAt: string;
 	times: number[];
-	locations: Record<string, (number | null)[]>;
+	locations: Record<string, Record<Component, (number | null)[]>>;
 }
 
+type OpenMeteoSeries = { time: number[] } & Record<string, (number | null)[]>;
+
 interface OpenMeteoForecast {
-	minutely_15: {
-		time: number[];
-		global_tilted_irradiance_instant: (number | null)[];
-		temperature_2m: (number | null)[];
-	};
+	minutely_15: OpenMeteoSeries;
 }
 
 interface OpenMeteoSatellite {
-	hourly: { time: number[]; global_tilted_irradiance_instant: (number | null)[] };
+	hourly: OpenMeteoSeries;
 }
 
 export function nzDate(instant: Date): string {
@@ -84,10 +102,18 @@ export async function getWeather(
 	let observedUntil: number | null = null;
 	const blended = Object.fromEntries(
 		locations.map(({ id }) => {
-			const { irradianceWm2, temperatureC } = forecast.locations[id];
-			const blend = blendIrradiance(satellite.times, satellite.locations[id], forecast.times, irradianceWm2);
-			if (blend.observedUntil !== null) observedUntil = Math.max(observedUntil ?? 0, blend.observedUntil);
-			return [id, { irradianceWm2: blend.irradianceWm2, temperatureC }];
+			const location = { ...forecast.locations[id] };
+			for (const component of COMPONENTS) {
+				const blend = blendIrradiance(
+					satellite.times,
+					satellite.locations[id][component],
+					forecast.times,
+					location[component],
+				);
+				location[component] = blend.irradianceWm2;
+				if (blend.observedUntil !== null) observedUntil = Math.max(observedUntil ?? 0, blend.observedUntil);
+			}
+			return [id, location];
 		}),
 	);
 	return { ...forecast, locations: blended, observedUntil };
@@ -108,7 +134,8 @@ async function getForecast(
 		const fetchedAt = new Date(forecast.fetchedAt);
 		// A forecast fetched after its day was over is final.
 		const fresh = nzDate(fetchedAt) > date || now.getTime() - fetchedAt.getTime() < MAX_FORECAST_AGE_MS;
-		if (fresh && locations.every((location) => location.id in forecast.locations)) return forecast;
+		const complete = locations.every((location) => location.id in forecast.locations);
+		if (forecast.format === CACHE_FORMAT && fresh && complete) return forecast;
 	}
 
 	const forecast = await fetchForecast(locations, date, now);
@@ -130,7 +157,7 @@ async function getSatellite(
 	forecast: Forecast,
 ): Promise<SatelliteDay | null> {
 	const sunlit = forecast.times.filter((_, i) =>
-		Object.values(forecast.locations).some((location) => location.irradianceWm2[i] > 0),
+		Object.values(forecast.locations).some((location) => location.ghiWm2[i] > 0),
 	);
 	if (sunlit.length === 0 || now.getTime() < sunlit[0]) return null;
 
@@ -139,7 +166,7 @@ async function getSatellite(
 		.bind(date)
 		.first<string>("data");
 	const previous: SatelliteDay | null = cached ? JSON.parse(cached) : null;
-	if (previous && locations.every((location) => location.id in previous.locations)) {
+	if (previous?.format === CACHE_FORMAT && locations.every((location) => location.id in previous.locations)) {
 		const fetchedAt = Date.parse(previous.fetchedAt);
 		// Fetched after the day's last sunlight had arrived, it's final.
 		const final = fetchedAt >= sunlit[sunlit.length - 1] + SATELLITE_DELAY_MS;
@@ -165,7 +192,7 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 		const res = await fetch(
 			`${OPEN_METEO_FORECAST_URL}?${new URLSearchParams({
 				...coordinates(batch.map((location) => location.forecast)),
-				minutely_15: "global_tilted_irradiance_instant,temperature_2m",
+				minutely_15: [...Object.values(OPEN_METEO_VARIABLES), "temperature_2m"].join(","),
 				...sharedParams(date),
 			})}`,
 		);
@@ -183,31 +210,37 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 	}
 	// Open-Meteo has been seen sending every value as null for a past day.
 	const hasGaps = forecasts.some(({ minutely_15: forecast }) =>
-		[...forecast.global_tilted_irradiance_instant, ...forecast.temperature_2m].includes(null),
+		[...Object.values(OPEN_METEO_VARIABLES), "temperature_2m"].some((variable) => forecast[variable].includes(null)),
 	);
 	if (hasGaps) {
 		throw new WeatherFetchError(`Open-Meteo sent weather with gaps for ${date}; try again later`);
 	}
 
 	return {
+		format: CACHE_FORMAT,
 		date,
 		fetchedAt: now.toISOString(),
 		times: forecasts[0].minutely_15.time.map((seconds) => seconds * 1000),
 		locations: Object.fromEntries(
-			locations.map((location, i) => [
-				location.id,
-				{
-					irradianceWm2: forecasts[i].minutely_15.global_tilted_irradiance_instant as number[],
-					temperatureC: forecasts[i].minutely_15.temperature_2m as number[],
-				},
-			]),
+			locations.map((location, i) => {
+				const series = forecasts[i].minutely_15;
+				const weather: LocationWeather = {
+					lat: location.forecast.lat,
+					long: location.forecast.long,
+					temperatureC: series.temperature_2m as number[],
+					ghiWm2: series[OPEN_METEO_VARIABLES.ghiWm2] as number[],
+					dniWm2: series[OPEN_METEO_VARIABLES.dniWm2] as number[],
+					dhiWm2: series[OPEN_METEO_VARIABLES.dhiWm2] as number[],
+				};
+				return [location.id, weather];
+			}),
 		),
 	};
 }
 
-// Himawari-9 irradiance on the model's panel, every 10 minutes on a ~5 km
-// grid, averaged over each location's pixels by their weights. Readings not
-// taken yet come back as null.
+// Himawari-9 irradiance every 10 minutes on a ~5 km grid, averaged over each
+// location's pixels by their weights. Readings not taken yet come back as
+// null.
 async function fetchSatellite(locations: WeatherLocation[], date: string, now: Date): Promise<SatelliteDay> {
 	const pixels = locations.flatMap((location) => location.pixels.map((pixel) => ({ ...pixel, id: location.id })));
 	const readings: OpenMeteoSatellite[] = [];
@@ -215,7 +248,7 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		const res = await fetch(
 			`${OPEN_METEO_SATELLITE_URL}?${new URLSearchParams({
 				...coordinates(batch),
-				hourly: "global_tilted_irradiance_instant",
+				hourly: Object.values(OPEN_METEO_VARIABLES).join(","),
 				temporal_resolution: "native",
 				models: "jma_jaxa_himawari",
 				...sharedParams(date),
@@ -225,24 +258,24 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		const body = await res.json<OpenMeteoSatellite | OpenMeteoSatellite[]>();
 		readings.push(...(Array.isArray(body) ? body : [body]));
 	}
-	if (readings.every(({ hourly }) => hourly.global_tilted_irradiance_instant.every((value) => value === null))) {
+	if (readings.every(({ hourly }) => hourly[OPEN_METEO_VARIABLES.ghiWm2].every((value) => value === null))) {
 		throw new WeatherFetchError("every reading was empty");
 	}
 
 	return {
+		format: CACHE_FORMAT,
 		date,
 		fetchedAt: now.toISOString(),
 		times: readings[0].hourly.time.map((seconds) => seconds * 1000),
 		locations: Object.fromEntries(
 			locations.map(({ id }) => {
 				const own = pixels.map((pixel, i) => [pixel, readings[i]] as const).filter(([pixel]) => pixel.id === id);
-				return [
-					id,
+				const average = (component: Component) =>
 					averagePixels(
-						own.map(([, { hourly }]) => hourly.global_tilted_irradiance_instant),
+						own.map(([, { hourly }]) => hourly[OPEN_METEO_VARIABLES[component]]),
 						own.map(([pixel]) => pixel.weight),
-					),
-				];
+					);
+				return [id, { ghiWm2: average("ghiWm2"), dniWm2: average("dniWm2"), dhiWm2: average("dhiWm2") }];
 			}),
 		),
 	};
@@ -257,8 +290,6 @@ function coordinates(points: { lat: number; long: number }[]) {
 
 function sharedParams(date: string) {
 	return {
-		tilt: String(PANEL_TILT_DEGREES),
-		azimuth: String(PANEL_AZIMUTH_DEGREES),
 		// The NZ day, with times returned as UTC instants so DST can't shift them.
 		timezone: "Pacific/Auckland",
 		start_date: date,

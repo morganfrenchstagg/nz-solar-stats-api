@@ -20,8 +20,9 @@ function dayTimes(date: string, stepSeconds: number): number[] {
 const nearIslington = (lat: string, long: string) =>
 	Math.abs(Number(lat) - ISLINGTON_LAT) < 0.15 && Math.abs(Number(long) - 172.5) < 0.15;
 
-// The forecast gives Islington full sun at 25 °C all day, and everywhere else
-// none. Like Open-Meteo, it only has about three months back to two weeks
+// The forecast gives Islington 1000 W/m² at 25 °C all day, all of it diffuse
+// so every roof gets the same whatever the sun's position, and everywhere
+// else none. Like Open-Meteo, it only has about three months back to two weeks
 // ahead; `nulls` mimics it sending a day with every value missing. The
 // satellite reads `satellite` W/m² at Islington, with readings arriving half
 // an hour after they're taken.
@@ -38,12 +39,10 @@ function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satellit
 			const arrived = (time: number) => time * 1000 <= Date.now() - 30 * MINUTE;
 			return Response.json(
 				lats.map((lat, i) => ({
-					hourly: {
-						time: times,
-						global_tilted_irradiance_instant: times.map((t) =>
-							!arrived(t) ? null : nearIslington(lat, longs[i]) ? satellite : 0,
-						),
-					},
+					hourly: sky(
+						times,
+						times.map((t) => (!arrived(t) ? null : nearIslington(lat, longs[i]) ? satellite : 0)),
+					),
 				})),
 			);
 		}
@@ -62,14 +61,23 @@ function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satellit
 				const sunny = nearIslington(lat, longs[i]);
 				return {
 					minutely_15: {
-						time: times,
-						global_tilted_irradiance_instant: times.map(() => (nulls ? null : sunny ? 1000 : 0)),
+						...sky(times, times.map(() => (nulls ? null : sunny ? 1000 : 0))),
 						temperature_2m: times.map(() => (nulls ? null : sunny ? 25 : 12)),
 					},
 				};
 			}),
 		);
 	});
+}
+
+// Overcast light: all diffuse, none direct.
+function sky(time: number[], irradiance: (number | null)[]) {
+	return {
+		time,
+		shortwave_radiation_instant: irradiance,
+		direct_normal_irradiance_instant: irradiance.map((value) => (value === null ? null : 0)),
+		diffuse_radiation_instant: irradiance,
+	};
 }
 
 function callsTo(fetch: ReturnType<typeof mockOpenMeteo>, hostname: string) {
@@ -126,28 +134,27 @@ describe("GET /solar-production[/{date}]", () => {
 			date: "2026-10-26",
 			capacityMonthEnd: "2026-09-30",
 			attribution: `Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari; population from ${gxpLocations.source}`,
-			// 58.787 MW × 1.2 DC:AC × 0.83 × 0.88 for cell heating
-			total: { distributedMw: 83.561, productionMw: 51.526 },
+			// 58.787 MW of rooftops under 1000 W/m² of overcast at 25 °C
+			total: { distributedMw: 83.561, productionMw: 49.414 },
 		});
 		expect(result.profileTimes).toHaveLength(96);
-		expect(result.total.profileMw).toEqual(Array(96).fill(51.526));
+		expect(result.total.profileMw).toEqual(Array(96).fill(49.414));
 		expect(result.gxps.map((gxp: any) => [gxp.gxp, gxp.distributedMw, gxp.productionMw])).toEqual([
-			["ISL", 58.787, 51.526],
+			["ISL", 58.787, 49.414],
 			["ASB", 24.774, 0],
 		]);
-		expect(result.gxps[0]).toMatchObject({ irradianceWm2: 1000, temperatureC: 25 });
+		// A panel tilted 20° sees 97.6% of an overcast sky.
+		expect(result.gxps[0]).toMatchObject({ irradianceWm2: 975.9, temperatureC: 25 });
 	});
 
-	it("asks Open-Meteo for today's NZ forecast at each GXP's population centre, on a north-facing tilted panel", async () => {
+	it("asks Open-Meteo for today's NZ forecast of direct and diffuse sunlight at each GXP's population centre", async () => {
 		const fetch = mockOpenMeteo();
 		await getProduction();
 
 		const url = new URL(String(fetch.mock.calls[0][0]));
 		expect(Object.fromEntries(url.searchParams)).toMatchObject({
 			latitude: [gxpLocations.gxps.ISL.centre[0], gxpLocations.gxps.ASB.centre[0]].map((lat) => lat.toFixed(4)).join(","),
-			minutely_15: "global_tilted_irradiance_instant,temperature_2m",
-			tilt: "20",
-			azimuth: "180",
+			minutely_15: "shortwave_radiation_instant,direct_normal_irradiance_instant,diffuse_radiation_instant,temperature_2m",
 			start_date: "2026-10-26",
 			end_date: "2026-10-26",
 			timeformat: "unixtime",
@@ -180,9 +187,10 @@ describe("GET /solar-production[/{date}]", () => {
 		expect(result.observedUntil).toBe("2026-10-26T00:30:00.000Z");
 		expect(at("13:30")).toBe(at("09:00"));
 		expect(at("13:30")).toBeLessThan(at("18:00"));
-		// Half an hour after the last reading, a quarter of the way back: 1000 × (0.5 + 0.5 × 0.25).
-		expect(isl.irradianceWm2).toBe(625);
-		expect(at("15:30")).toBe(51.526); // two hours on, the forecast's own
+		// Half an hour after the last reading, a quarter of the way back: 1000 × (0.5 + 0.5 × 0.25) = 625 W/m²
+		// of overcast, of which a panel tilted 20° gets 97.6%.
+		expect(isl.irradianceWm2).toBe(609.9);
+		expect(at("15:30")).toBe(49.414); // two hours on, the forecast's own
 	});
 
 	it("reads the satellite at each GXP's five most-populated pixels when it's 5 MW or more", async () => {
@@ -200,13 +208,13 @@ describe("GET /solar-production[/{date}]", () => {
 		const { status, result } = await getProduction();
 
 		expect(status).toBe(200);
-		expect(result).toMatchObject({ observedUntil: null, total: { productionMw: 51.526 } });
+		expect(result).toMatchObject({ observedUntil: null, total: { productionMw: 49.414 } });
 	});
 
 	it("treats /today the same as no date", async () => {
 		mockOpenMeteo();
 		const { result } = await getProduction("/today");
-		expect(result).toMatchObject({ date: "2026-10-26", total: { productionMw: 51.526 } });
+		expect(result).toMatchObject({ date: "2026-10-26", total: { productionMw: 49.414 } });
 	});
 
 	it("estimates the whole of yesterday, with no live values", async () => {
@@ -219,7 +227,7 @@ describe("GET /solar-production[/{date}]", () => {
 			date: "2026-10-25",
 			total: { distributedMw: 83.561, productionMw: null },
 		});
-		expect(result.total.profileMw).toEqual(Array(96).fill(51.526));
+		expect(result.total.profileMw).toEqual(Array(96).fill(49.414));
 		expect(result.gxps[0]).toMatchObject({
 			gxp: "ISL",
 			productionMw: null,
@@ -276,6 +284,18 @@ describe("GET /solar-production[/{date}]", () => {
 		// 26 days after the 30 September snapshot.
 		expect(isl.distributedMw).toBe(Math.round((58.787 + 2 * (26 / (365.25 / 12))) * 1000) / 1000);
 		expect(result.gxps.find((gxp: any) => gxp.gxp === "ASB")).toMatchObject({ distributedMw: 24.774, growthMwPerMonth: 0 });
+	});
+
+	it("models a GXP's farm-sized steps as a farm", async () => {
+		await env.DB.prepare(
+			"UPDATE solar_capacity SET step_mw = 10 WHERE nsp = 'ISL0331ORONGN' AND month_end = '2026-08-31'",
+		).run();
+		mockOpenMeteo();
+		const { result } = await getProduction();
+
+		expect(result.total).toMatchObject({ distributedMw: 83.561, farmMw: 10 });
+		// 48.787 MW of rooftops and a 10 MW farm, which puts out more per MW.
+		expect(result.gxps[0]).toMatchObject({ gxp: "ISL", distributedMw: 58.787, farmMw: 10, productionMw: 50.748 });
 	});
 
 	it("returns 404 with Open-Meteo's range for a date it has no weather for", async () => {

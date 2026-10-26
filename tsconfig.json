@@ -6,6 +6,7 @@
 		"moduleResolution": "bundler",
 		"types": ["@types/node", "./worker-configuration.d.ts"],
 		"noEmit": true,
+		"allowImportingTsExtensions": true,
 		"isolatedModules": true,
 		"resolveJsonModule": true,
 		"forceConsistentCasingInFileNames": true,

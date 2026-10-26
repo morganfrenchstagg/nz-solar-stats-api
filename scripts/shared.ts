@@ -1,10 +1,7 @@
 // Helpers shared by the backtest scripts.
 import { averagePixels, blendIrradiance, type WeatherPoints } from "../src/production/blend.ts";
-import {
-	estimateOutputMw,
-	PANEL_AZIMUTH_DEGREES,
-	PANEL_TILT_DEGREES,
-} from "../src/production/estimate.ts";
+import { estimateOutputMw, type SolarCapacity } from "../src/production/estimate.ts";
+import { type Sky, type Sun, sunAt } from "../src/production/solar.ts";
 
 export const QUARTER_HOUR_MS = 15 * 60 * 1000;
 
@@ -21,10 +18,10 @@ export function skyOf(clearness: number): string {
 }
 
 export interface Instant {
-	irradianceWm2: number; // on the model's panel
+	sky: Sky;
+	sun: Sun;
 	temperatureC: number;
-	groundWm2: number; // horizontal
-	topOfAtmosphereWm2: number;
+	topOfAtmosphereWm2: number; // on flat ground
 }
 
 export type Weather = Map<number, Instant>; // keyed by epoch ms
@@ -46,24 +43,21 @@ export async function fetchWeather(
 	{ source = "satellite" }: { source?: WeatherSource } = {},
 ): Promise<Weather> {
 	const range = {
-		tilt: String(PANEL_TILT_DEGREES),
-		azimuth: String(PANEL_AZIMUTH_DEGREES),
 		timezone: "Pacific/Auckland",
 		start_date: shiftDate(from, -1),
 		end_date: shiftDate(to, 1),
 		timeformat: "unixtime",
 	};
 	const [forecast] = await getSeries("https://api.open-meteo.com/v1/forecast", "minutely_15", [points.forecast], {
-		minutely_15: "global_tilted_irradiance_instant,temperature_2m,shortwave_radiation_instant,terrestrial_radiation_instant",
+		minutely_15: [...SKY_VARIABLES, "temperature_2m", "terrestrial_radiation_instant"].join(","),
 		...range,
 	});
 	const forecastTimes = forecast.time.map((seconds) => seconds * 1000);
-	let tilted = forecast.global_tilted_irradiance_instant as number[];
-	let ground = forecast.shortwave_radiation_instant as number[];
+	let [ghi, dni, dhi] = SKY_VARIABLES.map((variable) => forecast[variable] as number[]);
 
 	if (source === "satellite") {
 		const pixels = await getSeries("https://satellite-api.open-meteo.com/v1/archive", "hourly", points.pixels, {
-			hourly: "global_tilted_irradiance_instant,shortwave_radiation_instant",
+			hourly: SKY_VARIABLES.join(","),
 			temporal_resolution: "native",
 			models: "jma_jaxa_himawari",
 			...range,
@@ -81,21 +75,27 @@ export async function fetchWeather(
 				forecastTimes,
 				fallback,
 			).irradianceWm2;
-		tilted = blend("global_tilted_irradiance_instant", tilted);
-		ground = blend("shortwave_radiation_instant", ground);
+		[ghi, dni, dhi] = [blend(SKY_VARIABLES[0], ghi), blend(SKY_VARIABLES[1], dni), blend(SKY_VARIABLES[2], dhi)];
 	}
 
 	const weather: Weather = new Map();
 	forecastTimes.forEach((time, i) => {
 		weather.set(time, {
-			irradianceWm2: tilted[i],
+			sky: { ghiWm2: ghi[i], dniWm2: dni[i], dhiWm2: dhi[i] },
+			sun: sunAt(time, points.forecast.lat, points.forecast.long),
 			temperatureC: forecast.temperature_2m[i]!,
-			groundWm2: ground[i],
 			topOfAtmosphereWm2: forecast.terrestrial_radiation_instant[i]!,
 		});
 	});
 	return weather;
 }
+
+// Global horizontal, direct normal and diffuse horizontal, as the API fetches them.
+const SKY_VARIABLES = [
+	"shortwave_radiation_instant",
+	"direct_normal_irradiance_instant",
+	"diffuse_radiation_instant",
+] as const;
 
 // One series per point. Open-Meteo sometimes sends a past day as all nulls,
 // then has it moments later, so a mostly-null response is retried. The
@@ -134,12 +134,12 @@ function instantAt(weather: Weather, time: number): Instant {
 
 // The model's energy between two quarter-hour instants, in kWh, by the
 // trapezoid rule over the 15-minute weather.
-export function modelKwh(weather: Weather, start: number, end: number, capacityMw: number): number {
+export function modelKwh(weather: Weather, start: number, end: number, capacity: SolarCapacity): number {
 	let kwh = 0;
 	for (let time = start; time < end; time += QUARTER_HOUR_MS) {
 		const [from, to] = [time, time + QUARTER_HOUR_MS].map((t) => {
-			const { irradianceWm2, temperatureC } = instantAt(weather, t);
-			return estimateOutputMw(capacityMw, irradianceWm2, temperatureC);
+			const { sky, sun, temperatureC } = instantAt(weather, t);
+			return estimateOutputMw(capacity, sky, sun, temperatureC);
 		});
 		kwh += ((from + to) / 2) * 1000 * 0.25;
 	}
@@ -150,7 +150,7 @@ export function clearnessIndex(weather: Weather, date: string): number {
 	let ground = 0;
 	let topOfAtmosphere = 0;
 	for (let time = nzMidnight(date); time < nzMidnight(shiftDate(date, 1)); time += QUARTER_HOUR_MS) {
-		ground += instantAt(weather, time).groundWm2;
+		ground += instantAt(weather, time).sky.ghiWm2;
 		topOfAtmosphere += instantAt(weather, time).topOfAtmosphereWm2;
 	}
 	return ground / topOfAtmosphere;

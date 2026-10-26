@@ -21,6 +21,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { type GxpLocation, weatherPoints, type WeatherPoints } from "../src/production/blend.ts";
 import { capacityAt, type CapacityMonth } from "../src/production/capacity.ts";
+import type { SolarCapacity } from "../src/production/estimate.ts";
 import gxpLocations from "../src/production/gxpLocations.json" with { type: "json" };
 import {
 	clearnessIndex,
@@ -274,14 +275,18 @@ async function backtest(target: string, verbose: boolean): Promise<Result> {
 	const site = substations.find((substation) => substation.siteId === gxp);
 	if (!site) throw new Error(`no substation ${gxp}`);
 	const capacities = await capacityHistory(gxp);
-	// What the API would have estimated on each date, from the snapshots before it.
-	const capacityOn = (date: string) => {
+	// What the API would have estimated on each date, from the snapshots before
+	// it, with every farm-sized step so far modelled as a farm.
+	const capacityOn = (date: string): SolarCapacity => {
 		const estimate = capacityAt(capacities, date);
 		if (!estimate) throw new Error(`no capacity as at ${date}`);
-		if (capacityMethod === "snapshot") {
-			return capacities.find((month) => month.monthEnd === estimate.monthEnd)!.distributedMw;
-		}
-		return estimate.capacityMw;
+		const totalMw =
+			capacityMethod === "snapshot"
+				? capacities.find((month) => month.monthEnd === estimate.monthEnd)!.distributedMw
+				: estimate.capacityMw;
+		const stepsMw = capacities.filter((month) => month.monthEnd <= date).reduce((total, month) => total + month.stepMw, 0);
+		const farmMw = Math.min(stepsMw, totalMw);
+		return { rooftopMw: totalMw - farmMw, farmMw };
 	};
 	const lastDate = [...new Set(solar.flatMap((days) => [...days.keys()]))].sort().at(-1)!;
 	const latest = capacities.findLast((month) => month.monthEnd <= lastDate)!;
@@ -303,7 +308,7 @@ async function compare(subject: {
 	series: Days[];
 	// Where to take the weather, as the API would.
 	points: WeatherPoints;
-	capacityAt: (date: string) => number;
+	capacityAt: (date: string) => SolarCapacity;
 	kwPerIcp: number | null;
 }): Promise<Result> {
 	const solar = subject.series;
@@ -328,8 +333,9 @@ async function compare(subject: {
 
 	const weather = await fetchWeather(subject.points, dates[0], dates[dates.length - 1], { source: weatherSource });
 	for (const halfHour of halfHours) {
-		halfHour.capacityMw = subject.capacityAt(halfHour.tradingDate);
-		halfHour.modelKwh = modelKwh(weather, halfHour.start, halfHour.start + HALF_HOUR_MS, halfHour.capacityMw);
+		const capacity = subject.capacityAt(halfHour.tradingDate);
+		halfHour.capacityMw = capacity.rooftopMw + capacity.farmMw;
+		halfHour.modelKwh = modelKwh(weather, halfHour.start, halfHour.start + HALF_HOUR_MS, capacity);
 	}
 	const clearness = new Map(dates.map((date) => [date, clearnessIndex(weather, date)]));
 
@@ -339,14 +345,14 @@ async function compare(subject: {
 		target: subject.target,
 		name: subject.name,
 		halfHours,
-		capacityMw: subject.capacityAt(dates[dates.length - 1]),
+		capacityMw: halfHours[halfHours.length - 1].capacityMw,
 		kwPerIcp: subject.kwPerIcp,
 		skies: bySky(halfHours, clearness, measured.share),
 	};
 }
 
-// The dispatched solar farms, each modelled at its own location and dispatch
-// capacity, on its own satellite pixel.
+// The dispatched solar farms, each modelled as the model's farm array at its
+// own location and dispatch capacity, on its own satellite pixel.
 async function backtestFarms() {
 	const generators = (await (await fetch("https://api.electricitymap.frenchsta.gg/v1/generators")).json()) as {
 		location: { lat: number; long: number };
@@ -367,7 +373,7 @@ async function backtestFarms() {
 				name: farm.unit,
 				series: [days],
 				points: { forecast: generator.location, pixels: [{ ...generator.location, weight: 1 }] },
-				capacityAt: () => capacityMw,
+				capacityAt: () => ({ rooftopMw: 0, farmMw: capacityMw }),
 				kwPerIcp: null,
 			}),
 		);

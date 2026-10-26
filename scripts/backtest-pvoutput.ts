@@ -132,7 +132,7 @@ for (const systemId of candidates) {
 			.map((output) => ({
 				date: output.date,
 				actualKwh: output.generatedWh! / 1000,
-				modelKwh: modelKwh(weather, nzMidnight(output.date), nzMidnight(shiftDate(output.date, 1)), nameplateKw / 1000),
+				modelKwh: modelKwh(weather, nzMidnight(output.date), nzMidnight(shiftDate(output.date, 1)), { rooftopMw: nameplateKw / 1000, farmMw: 0 }),
 				clearness: clearnessIndex(weather, output.date),
 			}));
 		if (days.length < MIN_DAYS) {

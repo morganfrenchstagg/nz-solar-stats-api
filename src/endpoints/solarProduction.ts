@@ -24,6 +24,11 @@ const production = z.object({
 	distributedMw: z
 		.number()
 		.describe("Distributed solar capacity estimated for the date, in MW AC: the capacityMonthEnd snapshot plus recent growth since"),
+	farmMw: z
+		.number()
+		.describe(
+			"The part of distributedMw that arrived in farm-sized steps (solar farms too small to be dispatched), modelled as farms rather than rooftops",
+		),
 	productionMw: z.number().nullable().describe("Estimated output now, in MW AC. Null for other days."),
 	profileMw: z.array(z.number()).describe("Estimated output at each of profileTimes, in MW AC"),
 });
@@ -34,7 +39,7 @@ const gxpProduction = production.extend({
 	irradianceWm2: z
 		.number()
 		.nullable()
-		.describe("Irradiance now on a north-facing panel tilted 20°. Null for other days."),
+		.describe("Irradiance now on the average rooftop panel. Null for other days."),
 	temperatureC: z.number().nullable().describe("Air temperature now. Null for other days."),
 	growthMwPerMonth: z
 		.number()
@@ -44,7 +49,7 @@ const gxpProduction = production.extend({
 });
 
 const description =
-	"A first-cut model. Each GXP's distributed solar is treated as one north-facing array tilted 20°, with weather taken where its customers live (from Kontur's population grid) rather than at the substation. Irradiance is from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) for any time that has already happened, and Open-Meteo's 15-minute forecast after that; temperature is from the forecast.";
+	"Each GXP's rooftop solar is modelled as arrays tilted 20° facing the ways NZ roofs do (61% north, 19% north-east or north-west, 20% east or west), converting dim light less efficiently, as fitted to NZ rooftop systems on PVOutput. Farm-sized steps in its capacity, solar farms too small to be dispatched, are modelled as a fixed north-facing farm. Weather is taken where its customers live (from Kontur's population grid) rather than at the substation. Direct and diffuse sunlight are from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) for any time that has already happened, and Open-Meteo's 15-minute forecast after that, and are worked onto each array's panels; temperature is from the forecast.";
 
 const responses = {
 	"200": {
@@ -126,6 +131,12 @@ async function estimateDay(db: D1Database, requested: string) {
 		)
 		.bind(date)
 		.all<CapacityMonth & { gxp: string; name: string; lat: number; long: number }>();
+	// Every farm-sized step a GXP has had is modelled as a farm.
+	const { results: farms } = await db
+		.prepare("SELECT gxp, round(sum(step_mw), 3) AS farmMw FROM solar_capacity WHERE month_end <= ? GROUP BY gxp")
+		.bind(date)
+		.all<{ gxp: string; farmMw: number }>();
+	const farmMw = new Map(farms.map((farm) => [farm.gxp, farm.farmMw]));
 	const capacityMonthEnd = months.reduce((latest, month) => (month.monthEnd > latest ? month.monthEnd : latest), "");
 	const histories = new Map<string, typeof months>();
 	for (const month of months) histories.set(month.gxp, [...(histories.get(month.gxp) ?? []), month]);
@@ -135,7 +146,15 @@ async function estimateDay(db: D1Database, requested: string) {
 		.map((history) => {
 			const { gxp, name, lat, long } = history[0];
 			const estimate = capacityAt(history, date)!;
-			return { gxp, name, lat, long, distributedMw: round(estimate.capacityMw), growthMwPerMonth: round(estimate.growthMwPerMonth) };
+			return {
+				gxp,
+				name,
+				lat,
+				long,
+				distributedMw: round(estimate.capacityMw),
+				farmMw: round(Math.min(farmMw.get(gxp) ?? 0, estimate.capacityMw)),
+				growthMwPerMonth: round(estimate.growthMwPerMonth),
+			};
 		})
 		.filter((gxp) => gxp.distributedMw > 0)
 		.sort((a, b) => b.distributedMw - a.distributedMw);
@@ -157,7 +176,7 @@ async function estimateDay(db: D1Database, requested: string) {
 		throw error;
 	}
 	const estimates = estimateProduction(
-		gxps.map(({ gxp, name, distributedMw }) => ({ gxp, name, distributedMw })),
+		gxps.map(({ gxp, name, distributedMw, farmMw }) => ({ gxp, name, distributedMw, farmMw })),
 		weather,
 		isToday ? now : null,
 	);
@@ -175,6 +194,7 @@ async function estimateDay(db: D1Database, requested: string) {
 			profileTimes: weather.times.map((time) => new Date(time).toISOString()),
 			total: {
 				distributedMw: sum(estimates.map((estimate) => estimate.distributedMw)),
+				farmMw: sum(estimates.map((estimate) => estimate.farmMw)),
 				productionMw: isToday ? sum(estimates.map((estimate) => estimate.productionMw ?? 0)) : null,
 				profileMw: weather.times.map((_, index) =>
 					sum(estimates.map((estimate) => estimate.profileMw[index])),
