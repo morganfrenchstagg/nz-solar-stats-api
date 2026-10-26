@@ -51,7 +51,7 @@ EMI only publishes month-end snapshots, a few weeks after each month. So each GX
 
 The production estimate is a first-cut model. Each GXP's latest distributed capacity is treated as one north-facing array tilted 20° (constants in `src/production/estimate.ts`). Because real roofs face every way, it likely overstates the midday peak on clear days.
 
-Weather is taken where each GXP's customers live, not at its substation, which can be well out of town (Mangahao's sits in the Tararua foothills, 13 km from Levin). `npm run gxp-locations` builds `src/production/gxpLocations.json` from [Kontur](https://www.kontur.io/portfolio/population-dataset/)'s 400 m population grid, assigning each hexagon to its nearest GXP: each GXP's population-weighted centre and its five most-populated satellite pixels. Rerun it when GXPs change; a GXP missing from it falls back to its substation.
+Weather is taken where each GXP's customers live, not at its substation, which can be well out of town (Mangahao's sits in the Tararua foothills, 13 km from Levin). `npm run gxp-locations` builds `src/production/gxpLocations.json` from [Kontur](https://www.kontur.io/portfolio/population-dataset/)'s 400 m population grid, assigning each hexagon to its nearest GXP (leaving out islands off the grid, like the Chathams): each GXP's population-weighted centre and its five most-populated satellite pixels. Rerun it when GXPs change; a GXP missing from it falls back to its substation.
 
 Irradiance comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`):
 
