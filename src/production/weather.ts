@@ -4,12 +4,17 @@ const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archive";
 // Every location (and satellite pixel) counts against Open-Meteo's 10,000
 // free calls a day. The forecast for all GXPs is refreshed at most every three
-// hours (125 × 8 calls), and the satellite's ~345 pixels at most hourly while
-// the sun's up (about 345 × 14), so a day of steady use stays near 6,000. A
-// day that's over doesn't change, so its weather is kept for good, unless a
-// GXP's points have moved since (see gxpWeatherPoints).
+// hours (125 × 8 calls), and the satellite's ~310 pixels at most every half
+// hour from 10am to 4pm, when most of the day's sunlight falls, and hourly
+// otherwise while the sun's up (about 310 × 25 on December's long days), so a
+// day of steady use stays under 9,000. A day that's over doesn't change, so its
+// weather is kept for good, unless a GXP's points have moved since (see
+// gxpWeatherPoints).
 const MAX_FORECAST_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_SATELLITE_AGE_MS = 60 * 60 * 1000;
+const MIDDAY_SATELLITE_AGE_MS = 30 * 60 * 1000;
+// NZ hours, 10am up to 4pm.
+const MIDDAY = { from: 10, to: 16 };
 // Himawari readings arrive about half an hour after they're taken.
 const SATELLITE_DELAY_MS = 60 * 60 * 1000;
 // Keeps request URLs to a sensible length.
@@ -85,6 +90,12 @@ interface OpenMeteoSatellite {
 
 export function nzDate(instant: Date): string {
 	return new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" }).format(instant);
+}
+
+function nzHour(instant: Date): number {
+	const parts = new Intl.DateTimeFormat("en-NZ", { timeZone: "Pacific/Auckland", hour: "numeric", hourCycle: "h23" })
+		.formatToParts(instant);
+	return Number(parts.find((part) => part.type === "hour")!.value);
 }
 
 // The calendar day before a YYYY-MM-DD date.
@@ -192,7 +203,9 @@ async function getSatellite(
 		const fetchedAt = Date.parse(previous.fetchedAt);
 		// Fetched after the day's last sunlight had arrived, it's final.
 		const final = fetchedAt >= sunlit[sunlit.length - 1] + SATELLITE_DELAY_MS;
-		if (final || now.getTime() - fetchedAt < MAX_SATELLITE_AGE_MS) return previous;
+		const hour = nzHour(now);
+		const maxAge = hour >= MIDDAY.from && hour < MIDDAY.to ? MIDDAY_SATELLITE_AGE_MS : MAX_SATELLITE_AGE_MS;
+		if (final || now.getTime() - fetchedAt < maxAge) return previous;
 	}
 
 	try {
@@ -266,7 +279,10 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 // location's pixels by their weights. Readings not taken yet come back as
 // null.
 async function fetchSatellite(locations: WeatherLocation[], date: string, now: Date): Promise<SatelliteDay> {
-	const pixels = locations.flatMap((location) => location.pixels.map((pixel) => ({ ...pixel, id: location.id })));
+	// Neighbouring GXPs' people can share a pixel, which is only asked for once.
+	const pixels = [
+		...new Map(locations.flatMap((location) => location.pixels.map((pixel) => [point(pixel), pixel] as const))).values(),
+	];
 	const readings: OpenMeteoSatellite[] = [];
 	for (const batch of batches(pixels)) {
 		const res = await fetch(
@@ -293,6 +309,7 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 	if (readings.every(({ hourly }) => ofDay(hourly[OPEN_METEO_VARIABLES.ghiWm2]).every((value) => value === null))) {
 		throw new WeatherFetchError("every reading was empty");
 	}
+	const readingsAt = new Map(pixels.map((pixel, i) => [point(pixel), readings[i].hourly]));
 
 	return {
 		format: CACHE_FORMAT,
@@ -300,12 +317,11 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		fetchedAt: now.toISOString(),
 		times: ofDay(times),
 		locations: Object.fromEntries(
-			locations.map(({ id }) => {
-				const own = pixels.map((pixel, i) => [pixel, readings[i]] as const).filter(([pixel]) => pixel.id === id);
+			locations.map(({ id, pixels: own }) => {
 				const average = (component: Component) =>
 					averagePixels(
-						own.map(([, { hourly }]) => ofDay(hourly[OPEN_METEO_VARIABLES[component]])),
-						own.map(([pixel]) => pixel.weight),
+						own.map((pixel) => ofDay(readingsAt.get(point(pixel))![OPEN_METEO_VARIABLES[component]])),
+						own.map((pixel) => pixel.weight),
 					);
 				return [id, { ghiWm2: average("ghiWm2"), dniWm2: average("dniWm2"), dhiWm2: average("dhiWm2") }];
 			}),
@@ -317,11 +333,15 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 // Where a location's forecast and satellite readings are taken, as sent to
 // Open-Meteo, with each pixel's weight in the average.
 function forecastPoint({ forecast }: WeatherLocation): string {
-	return `${forecast.lat.toFixed(4)},${forecast.long.toFixed(4)}`;
+	return point(forecast);
 }
 
 function satellitePixels({ pixels }: WeatherLocation): string {
-	return pixels.map((pixel) => `${pixel.lat.toFixed(4)},${pixel.long.toFixed(4)},${pixel.weight}`).join(";");
+	return pixels.map((pixel) => `${point(pixel)},${pixel.weight}`).join(";");
+}
+
+function point({ lat, long }: { lat: number; long: number }): string {
+	return `${lat.toFixed(4)},${long.toFixed(4)}`;
 }
 
 // Whether a cached day has every location's weather, taken where it's wanted now.
