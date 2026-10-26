@@ -25,7 +25,8 @@ const nearIslington = (lat: string, long: string) =>
 // else none. Like Open-Meteo, it only has about three months back (to `from`)
 // to two weeks ahead; `nulls` mimics it sending a day with every value
 // missing. The satellite reads `satellite` W/m² at Islington, with readings
-// arriving half an hour after they're taken.
+// arriving half an hour after they're taken; like the archive, it serves UTC
+// days, and none after today's in UTC.
 function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satelliteStatus = 200, from = "2026-07-24" } = {}) {
 	return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		const url = new URL(String(input instanceof Request ? input.url : input));
@@ -35,7 +36,17 @@ function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satellit
 
 		if (url.hostname === SATELLITE) {
 			if (satelliteStatus !== 200) return new Response("Server error", { status: satelliteStatus });
-			const times = dayTimes(date, 600);
+			const end = url.searchParams.get("end_date")!;
+			const today = new Date().toISOString().slice(0, 10);
+			if (end > today) {
+				return Response.json(
+					{ error: true, reason: `Parameter 'end_date' is out of allowed range from 1983-01-01 to ${today}` },
+					{ status: 400 },
+				);
+			}
+			const start = Date.parse(`${date}T00:00:00Z`) / 1000;
+			const days = (Date.parse(`${end}T00:00:00Z`) / 1000 - start) / 86400 + 1;
+			const times = Array.from({ length: days * 144 }, (_, i) => start + i * 600);
 			const arrived = (time: number) => time * 1000 <= Date.now() - 30 * MINUTE;
 			return Response.json(
 				lats.map((lat, i) => ({
@@ -191,6 +202,19 @@ describe("GET /solar-production[/{date}]", () => {
 		// of overcast, of which a panel tilted 20° gets 97.6%.
 		expect(isl.irradianceWm2).toBe(609.9);
 		expect(at("15:30")).toBe(49.414); // two hours on, the forecast's own
+	});
+
+	it("uses the satellite's readings on an NZ morning, while it's still yesterday in UTC", async () => {
+		// 10:30am in NZ, 9:30pm the day before in UTC.
+		vi.setSystemTime(Date.parse("2026-10-25T21:30:00Z"));
+		const fetch = mockOpenMeteo({ satellite: 500 });
+		const { result } = await getProduction();
+
+		const url = new URL(String(callsTo(fetch, SATELLITE)[0][0]));
+		expect(Object.fromEntries(url.searchParams)).toMatchObject({ start_date: "2026-10-25", end_date: "2026-10-25" });
+		expect(url.searchParams.has("timezone")).toBe(false);
+		expect(result).toMatchObject({ date: "2026-10-26", observedUntil: "2026-10-25T21:00:00.000Z" });
+		expect(result.profileTimes[0]).toBe("2026-10-25T11:00:00.000Z");
 	});
 
 	it("reads the satellite at each GXP's five most-populated pixels when it's 5 MW or more", async () => {

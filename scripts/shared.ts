@@ -69,8 +69,9 @@ export async function fetchWeather(
 			temporal_resolution: "native",
 			models: "jma_jaxa_himawari",
 			...range,
-			// The satellite archive has nothing after today.
-			end_date: [range.end_date, nzDate(Date.now())].sort()[0],
+			// The satellite archive takes no date after today's in UTC, which
+			// until midday in NZ is still yesterday.
+			end_date: [range.end_date, new Date().toISOString().slice(0, 10)].sort()[0],
 		});
 		const satelliteTimes = pixels[0].time.map((seconds) => seconds * 1000);
 		const blend = (variable: string, fallback: number[]) =>
