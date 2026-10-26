@@ -21,11 +21,11 @@ const nearIslington = (lat: string, long: string) =>
 	Math.abs(Number(lat) - ISLINGTON_LAT) < 0.15 && Math.abs(Number(long) - 172.5) < 0.15;
 
 // The forecast gives Islington full sun at 25 °C all day, and everywhere else
-// none. Like Open-Meteo, it only has about three months back to two weeks
-// ahead; `nulls` mimics it sending a day with every value missing. The
-// satellite reads `satellite` W/m² at Islington, with readings arriving half
-// an hour after they're taken.
-function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satelliteStatus = 200 } = {}) {
+// none. Like Open-Meteo, it only has about three months back (to `from`) to
+// two weeks ahead; `nulls` mimics it sending a day with every value missing.
+// The satellite reads `satellite` W/m² at Islington, with readings arriving
+// half an hour after they're taken.
+function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satelliteStatus = 200, from = "2026-07-24" } = {}) {
 	return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		const url = new URL(String(input instanceof Request ? input.url : input));
 		const date = url.searchParams.get("start_date")!;
@@ -49,9 +49,9 @@ function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satellit
 		}
 		if (url.hostname !== FORECAST) return new Response("Not found", { status: 404 });
 		if (status !== 200) return Response.json({ error: true, reason: "Too many requests" }, { status });
-		if (date < "2026-07-24" || date > "2026-11-09") {
+		if (date < from || date > "2026-11-09") {
 			return Response.json(
-				{ error: true, reason: "Parameter 'start_date' is out of allowed range from 2026-07-24 to 2026-11-09" },
+				{ error: true, reason: `Parameter 'start_date' is out of allowed range from ${from} to 2026-11-09` },
 				{ status: 400 },
 			);
 		}
@@ -240,6 +240,62 @@ describe("GET /solar-production[/{date}]", () => {
 			observedUntil: "2026-10-20T10:50:00.000Z",
 			total: { productionMw: null },
 		});
+	});
+
+	it("refetches a past day's weather once a GXP's points have moved", async () => {
+		const fetch = mockOpenMeteo();
+		await getProduction("/2026-10-20");
+		// As if gxpLocations.json had been rebuilt with Islington somewhere else.
+		await env.DB.batch([
+			env.DB.prepare("UPDATE weather_forecasts SET forecast = json_set(forecast, '$.points.ISL', '-43.5000,172.5000')"),
+			env.DB.prepare("UPDATE satellite_irradiance SET data = json_set(data, '$.pixels.ISL', '-43.5000,172.5000,1')"),
+		]);
+		await getProduction("/2026-10-20");
+		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 2]);
+
+		// Taken in the right places again, it's kept for good.
+		await getProduction("/2026-10-20");
+		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 2]);
+	});
+
+	it("refetches weather cached before it recorded where it was taken", async () => {
+		const fetch = mockOpenMeteo();
+		await getProduction("/2026-10-20");
+		await env.DB.batch([
+			env.DB.prepare("UPDATE weather_forecasts SET forecast = json_remove(forecast, '$.points')"),
+			env.DB.prepare("UPDATE satellite_irradiance SET data = json_remove(data, '$.pixels')"),
+		]);
+		await getProduction("/2026-10-20");
+		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 2]);
+	});
+
+	it("keeps a day's forecast from a GXP's old points once Open-Meteo no longer has the day", async () => {
+		mockOpenMeteo();
+		const before = await getProduction("/2026-10-20");
+		await env.DB.prepare("UPDATE weather_forecasts SET forecast = json_set(forecast, '$.points.ISL', '-43.5000,172.5000')").run();
+
+		vi.restoreAllMocks();
+		const fetch = mockOpenMeteo({ from: "2026-10-21" });
+		const { status, result } = await getProduction("/2026-10-20");
+
+		expect(status).toBe(200);
+		expect(callsTo(fetch, FORECAST)).toHaveLength(1);
+		expect(result.total.profileMw).toEqual(before.result.total.profileMw);
+	});
+
+	it("uses satellite readings from a GXP's old pixels when a refetch fails, if they cover every GXP", async () => {
+		mockOpenMeteo({ satellite: 500 });
+		await getProduction();
+		await env.DB.prepare("UPDATE satellite_irradiance SET data = json_set(data, '$.pixels.ISL', '-43.5000,172.5000,1')").run();
+		vi.restoreAllMocks();
+		mockOpenMeteo({ satelliteStatus: 500 });
+		expect((await getProduction()).result.observedUntil).toBe("2026-10-26T00:30:00.000Z");
+
+		// Without Islington's readings there's nothing to fall back to but the forecast.
+		await env.DB.prepare("UPDATE satellite_irradiance SET data = json_remove(data, '$.locations.ISL')").run();
+		const { status, result } = await getProduction();
+		expect(status).toBe(200);
+		expect(result).toMatchObject({ observedUntil: null, total: { productionMw: 51.526 } });
 	});
 
 	it("forecasts a future day without the satellite, refreshing every three hours", async () => {
