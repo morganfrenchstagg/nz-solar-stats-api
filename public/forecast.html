@@ -102,6 +102,10 @@
 	.baseline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
 	.area { fill: var(--series-1); fill-opacity: 0.1; }
 	.line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+	.line.forecast { stroke-dasharray: 5 4; }
+	.key { display: flex; gap: 16px; margin-bottom: 8px; font-size: 13px; color: var(--text-secondary); }
+	.key span { display: flex; align-items: center; gap: 6px; }
+	.key svg { width: 20px; height: 4px; overflow: visible; }
 	.now-rule { stroke: var(--text-muted); stroke-width: 1; shape-rendering: crispEdges; }
 	.crosshair { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
 	.dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
@@ -158,6 +162,10 @@
 
 	<figure class="chart" id="chart" hidden>
 		<figcaption id="chart-title">Estimated output (MW)</figcaption>
+		<div class="key">
+			<span id="key-observed"><svg aria-hidden="true"><line class="line" x1="0" y1="2" x2="20" y2="2"/></svg>Satellite</span>
+			<span id="key-forecast"><svg aria-hidden="true"><line class="line forecast" x1="0" y1="2" x2="20" y2="2"/></svg>Forecast</span>
+		</div>
 		<div class="plot" id="plot" tabindex="0" aria-label="Output chart. Use the arrow keys to read values.">
 			<svg id="svg" role="img"></svg>
 			<div class="tooltip" id="tooltip" aria-live="polite" hidden><strong id="tooltip-value"></strong><span id="tooltip-time"></span></div>
@@ -175,12 +183,12 @@
 
 	<footer>
 		<p>
-			A first-cut model that hasn't been backtested: each GXP's distributed solar is treated as one north-facing
-			array tilted 20°, under the 15-minute irradiance and temperature forecast at the substation.
-			Capacities are registry nameplate MW AC, net of dispatched solar farms.
-			Data from the <a href="/">NZ Solar Stats API</a>.
+			A first-cut model: each GXP's distributed solar is treated as one north-facing array tilted 20°. Irradiance
+			is from Himawari satellite readings around the GXP for times that have passed (about half an hour behind),
+			and the 15-minute forecast after that. Capacities are registry nameplate MW AC, net of dispatched solar
+			farms. Data from the <a href="/">NZ Solar Stats API</a>.
 		</p>
-		<p>Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0).</p>
+		<p>Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0); satellite data from JMA/JAXA Himawari.</p>
 	</footer>
 </main>
 
@@ -285,8 +293,17 @@
 		const isLive = series.productionMw !== null;
 		const date = dateFormat.format(Date.parse(data.date + "T12:00:00Z"));
 
+		const observedUntil = data.observedUntil === null ? null : Date.parse(data.observedUntil);
+		const sources =
+			observedUntil === null
+				? "forecast"
+				: observedUntil >= times[times.length - 1]
+					? "satellite"
+					: "satellite to " + timeFormat.format(observedUntil) + ", forecast after";
 		document.getElementById("subtitle").textContent =
-			date + (isLive ? " · estimated at " + timeFormat.format(estimatedAt) : " · whole day");
+			date + (isLive ? " · estimated at " + timeFormat.format(estimatedAt) : " · whole day") + " · " + sources;
+		document.getElementById("key-observed").hidden = observedUntil === null;
+		document.getElementById("key-forecast").hidden = observedUntil !== null && observedUntil >= times[times.length - 1];
 		document.getElementById("now-tile").hidden = !isLive;
 		if (isLive) {
 			document.getElementById("now-value").textContent = formatMw(series.productionMw);
@@ -372,7 +389,11 @@
 
 		const points = series.profileMw.map((mw, index) => x(times[index]) + "," + y(mw));
 		el("path", { class: "area", d: "M" + x(start) + "," + y(0) + "L" + points.join("L") + "L" + x(times[times.length - 1]) + "," + y(0) + "Z" }, svg);
-		el("path", { class: "line", d: "M" + points.join("L") }, svg);
+		// Solid where the satellite has readings, dashed where it's the forecast.
+		const observedUntil = data.observedUntil === null ? -Infinity : Date.parse(data.observedUntil);
+		const split = times.filter((time) => time <= observedUntil).length;
+		if (split > 0) el("path", { class: "line", d: "M" + points.slice(0, split).join("L") }, svg);
+		if (split < points.length) el("path", { class: "line forecast", d: "M" + points.slice(Math.max(split - 1, 0)).join("L") }, svg);
 
 		if (series.productionMw !== null && estimatedAt >= start && estimatedAt <= end) {
 			el("line", { class: "now-rule", x1: x(estimatedAt), x2: x(estimatedAt), y1: margin.top - 6, y2: y(0) }, svg);
@@ -408,7 +429,9 @@
 		hoverDot.setAttribute("visibility", "visible");
 
 		document.getElementById("tooltip-value").textContent = formatMw(mw);
-		document.getElementById("tooltip-time").textContent = timeFormat.format(times[hoverIndex]);
+		const observed = data.observedUntil !== null && times[hoverIndex] <= Date.parse(data.observedUntil);
+		document.getElementById("tooltip-time").textContent =
+			timeFormat.format(times[hoverIndex]) + (observed ? " · satellite" : " · forecast");
 		tooltip.hidden = false;
 		const left = px + 12 + tooltip.offsetWidth > width ? px - 12 - tooltip.offsetWidth : px + 12;
 		tooltip.style.left = left + "px";

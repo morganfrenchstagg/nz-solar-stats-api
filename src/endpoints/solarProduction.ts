@@ -35,7 +35,7 @@ const gxpProduction = production.extend({
 });
 
 const description =
-	"A first-cut model that hasn't been backtested yet. Each GXP's distributed solar is treated as one north-facing array tilted 20°, under Open-Meteo's 15-minute irradiance and temperature at the substation.";
+	"A first-cut model. Each GXP's distributed solar is treated as one north-facing array tilted 20°. Irradiance is from Himawari satellite readings (averaged over pixels around the GXP) for any time that has already happened, and Open-Meteo's 15-minute forecast after that; temperature is from the forecast.";
 
 const responses = {
 	"200": {
@@ -47,6 +47,10 @@ const responses = {
 				date: z.string().describe("The NZ date estimated"),
 				capacityMonthEnd: z.string().describe("The month end the capacities are from"),
 				weatherFetchedAt: z.string(),
+				observedUntil: z
+					.string()
+					.nullable()
+					.describe("Irradiance up to this instant is from satellite readings, after it from the forecast"),
 				attribution: z.string(),
 				profileTimes: z.array(z.string()).describe("The day's 15-minute instants, in UTC"),
 				total: production,
@@ -120,7 +124,7 @@ async function estimateDay(db: D1Database, requested: string) {
 	try {
 		weather = await getWeather(
 			db,
-			gxps.map(({ gxp, lat, long }) => ({ id: gxp, lat, long })),
+			gxps.map(({ gxp, lat, long, distributedMw }) => ({ id: gxp, lat, long, capacityMw: distributedMw })),
 			date,
 			now,
 		);
@@ -143,7 +147,8 @@ async function estimateDay(db: D1Database, requested: string) {
 			date,
 			capacityMonthEnd: gxps[0].monthEnd,
 			weatherFetchedAt: weather.fetchedAt,
-			attribution: "Weather data by Open-Meteo.com (CC BY 4.0)",
+			observedUntil: weather.observedUntil === null ? null : new Date(weather.observedUntil).toISOString(),
+			attribution: "Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari",
 			profileTimes: weather.times.map((time) => new Date(time).toISOString()),
 			total: {
 				distributedMw: sum(estimates.map((estimate) => estimate.distributedMw)),

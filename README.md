@@ -47,7 +47,16 @@ Endpoints:
 
 `/forecast` is a page charting that estimate for NZ or any one GXP, today or yesterday (e.g. `/forecast?gxp=ISL&day=yesterday`). It's a static file in `public/`, served by Workers Static Assets.
 
-The production estimate is a first-cut model that hasn't been backtested. Each GXP's latest distributed capacity is treated as one north-facing array tilted 20°, under [Open-Meteo](https://open-meteo.com/)'s forecast irradiance and temperature at the substation (constants in `src/production/estimate.ts`). Because real roofs face every way, it likely overstates the midday peak on clear days. Weather is cached in D1 per date: today's and future days' are refreshed at most hourly, and a past day's is kept for good once fetched after it ended. That keeps us within Open-Meteo's free limit of 10,000 calls a day, where each GXP counts as one call (about 125 per new date). Responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0.
+The production estimate is a first-cut model. Each GXP's latest distributed capacity is treated as one north-facing array tilted 20° (constants in `src/production/estimate.ts`). Because real roofs face every way, it likely overstates the midday peak on clear days.
+
+Irradiance comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`):
+
+- For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, about half an hour behind. GXPs of 5 MW or more average five pixels (their own and four ~5 km away); smaller ones use their own.
+- After the latest reading, the 15-minute forecast. How cloudy the last reading was compared with the forecast fades out over two hours, so the two don't jump apart.
+
+Temperature is always from the forecast. If the satellite fails, the estimate falls back to the forecast.
+
+Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari.
 
 ### Backtesting
 
