@@ -6,7 +6,8 @@ const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archiv
 // free calls a day. The forecast for all GXPs is refreshed at most every three
 // hours (125 × 8 calls), and the satellite's ~345 pixels at most hourly while
 // the sun's up (about 345 × 14), so a day of steady use stays near 6,000. A
-// day that's over doesn't change, so its weather is kept for good.
+// day that's over doesn't change, so its weather is kept for good, unless a
+// GXP's points have moved since (see gxpWeatherPoints).
 const MAX_FORECAST_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_SATELLITE_AGE_MS = 60 * 60 * 1000;
 // Himawari readings arrive about half an hour after they're taken.
@@ -55,7 +56,11 @@ export interface DayWeather {
 	observedUntil: number | null;
 }
 
-type Forecast = Omit<DayWeather, "observedUntil"> & { format: number };
+// Where each location's weather was taken (see forecastPoint and
+// satellitePixels), so a cached day is refetched once a GXP's points move.
+type TakenAt = Record<string, string>;
+
+type Forecast = Omit<DayWeather, "observedUntil"> & { format: number; points: TakenAt };
 
 // Each location's satellite irradiance, averaged over its pixels, every 10 minutes.
 interface SatelliteDay {
@@ -64,6 +69,7 @@ interface SatelliteDay {
 	fetchedAt: string;
 	times: number[];
 	locations: Record<string, Record<Component, (number | null)[]>>;
+	pixels: TakenAt;
 }
 
 type OpenMeteoSeries = { time: number[] } & Record<string, (number | null)[]>;
@@ -129,16 +135,25 @@ async function getForecast(
 		.prepare("SELECT forecast FROM weather_forecasts WHERE nz_date = ?")
 		.bind(date)
 		.first<string>("forecast");
-	if (cached) {
-		const forecast: Forecast = JSON.parse(cached);
-		const fetchedAt = new Date(forecast.fetchedAt);
+	const previous = current<Forecast>(cached);
+	if (previous && takenAt(previous.points, locations, forecastPoint)) {
+		const fetchedAt = new Date(previous.fetchedAt);
 		// A forecast fetched after its day was over is final.
 		const fresh = nzDate(fetchedAt) > date || now.getTime() - fetchedAt.getTime() < MAX_FORECAST_AGE_MS;
-		const complete = locations.every((location) => location.id in forecast.locations);
-		if (forecast.format === CACHE_FORMAT && fresh && complete) return forecast;
+		if (fresh) return previous;
 	}
 
-	const forecast = await fetchForecast(locations, date, now);
+	let forecast: Forecast;
+	try {
+		forecast = await fetchForecast(locations, date, now);
+	} catch (error) {
+		// Open-Meteo no longer has a day whose GXP points have moved since it
+		// was cached: their weather from where they used to be beats none.
+		if (error instanceof WeatherUnavailableError && previous && hasEvery(previous.locations, locations)) {
+			return previous;
+		}
+		throw error;
+	}
 	await db
 		.prepare("INSERT OR REPLACE INTO weather_forecasts (nz_date, forecast) VALUES (?, ?)")
 		.bind(date, JSON.stringify(forecast))
@@ -165,8 +180,8 @@ async function getSatellite(
 		.prepare("SELECT data FROM satellite_irradiance WHERE nz_date = ?")
 		.bind(date)
 		.first<string>("data");
-	const previous: SatelliteDay | null = cached ? JSON.parse(cached) : null;
-	if (previous?.format === CACHE_FORMAT && locations.every((location) => location.id in previous.locations)) {
+	const previous = current<SatelliteDay>(cached);
+	if (previous && takenAt(previous.pixels, locations, satellitePixels)) {
 		const fetchedAt = Date.parse(previous.fetchedAt);
 		// Fetched after the day's last sunlight had arrived, it's final.
 		const final = fetchedAt >= sunlit[sunlit.length - 1] + SATELLITE_DELAY_MS;
@@ -182,7 +197,8 @@ async function getSatellite(
 		return satellite;
 	} catch (error) {
 		console.warn(`No satellite irradiance for ${date}: ${(error as Error).message}`);
-		return previous;
+		// Even from pixels a GXP has since moved from, as long as it has them all.
+		return previous && hasEvery(previous.locations, locations) ? previous : null;
 	}
 }
 
@@ -235,6 +251,7 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 				return [location.id, weather];
 			}),
 		),
+		points: Object.fromEntries(locations.map((location) => [location.id, forecastPoint(location)])),
 	};
 }
 
@@ -278,7 +295,38 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 				return [id, { ghiWm2: average("ghiWm2"), dniWm2: average("dniWm2"), dhiWm2: average("dhiWm2") }];
 			}),
 		),
+		pixels: Object.fromEntries(locations.map((location) => [location.id, satellitePixels(location)])),
 	};
+}
+
+// Where a location's forecast and satellite readings are taken, as sent to
+// Open-Meteo, with each pixel's weight in the average.
+function forecastPoint({ forecast }: WeatherLocation): string {
+	return `${forecast.lat.toFixed(4)},${forecast.long.toFixed(4)}`;
+}
+
+function satellitePixels({ pixels }: WeatherLocation): string {
+	return pixels.map((pixel) => `${pixel.lat.toFixed(4)},${pixel.long.toFixed(4)},${pixel.weight}`).join(";");
+}
+
+// Whether a cached day has every location's weather, taken where it's wanted now.
+// Days cached before points were recorded have none, so they're refetched once.
+function takenAt(
+	cached: TakenAt | undefined,
+	locations: WeatherLocation[],
+	where: (location: WeatherLocation) => string,
+): boolean {
+	return cached !== undefined && locations.every((location) => cached[location.id] === where(location));
+}
+
+// A cached day, unless it's in an older format, which can't be used at all.
+function current<T extends { format?: number }>(cached: string | null): T | null {
+	const parsed: T | null = cached ? JSON.parse(cached) : null;
+	return parsed?.format === CACHE_FORMAT ? parsed : null;
+}
+
+function hasEvery(cached: Record<string, unknown>, locations: WeatherLocation[]): boolean {
+	return locations.every((location) => location.id in cached);
 }
 
 function coordinates(points: { lat: number; long: number }[]) {
