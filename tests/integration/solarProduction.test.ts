@@ -24,10 +24,17 @@ const nearIslington = (lat: string, long: string) =>
 // so every roof gets the same whatever the sun's position, and everywhere
 // else none. Like Open-Meteo, it only has about three months back (to `from`)
 // to two weeks ahead; `nulls` mimics it sending a day with every value
-// missing. The satellite reads `satellite` W/m² at Islington, with readings
-// arriving half an hour after they're taken; like the archive, it serves UTC
-// days, and none after today's in UTC.
-function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satelliteStatus = 200, from = "2026-07-24" } = {}) {
+// missing. The satellite reads `satellite` W/m² at Islington (or `satelliteAt`
+// each pixel), with readings arriving half an hour after they're taken; like
+// the archive, it serves UTC days, and none after today's in UTC.
+function mockOpenMeteo({
+	nulls = false,
+	status = 200,
+	satellite = 1000,
+	satelliteAt = (lat: string, long: string) => (nearIslington(lat, long) ? satellite : 0),
+	satelliteStatus = 200,
+	from = "2026-07-24",
+} = {}) {
 	return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		const url = new URL(String(input instanceof Request ? input.url : input));
 		const date = url.searchParams.get("start_date")!;
@@ -52,7 +59,7 @@ function mockOpenMeteo({ nulls = false, status = 200, satellite = 1000, satellit
 				lats.map((lat, i) => ({
 					hourly: sky(
 						times,
-						times.map((t) => (!arrived(t) ? null : nearIslington(lat, longs[i]) ? satellite : 0)),
+						times.map((t) => (!arrived(t) ? null : satelliteAt(lat, longs[i]))),
 					),
 				})),
 			);
@@ -172,20 +179,34 @@ describe("GET /solar-production[/{date}]", () => {
 		});
 	});
 
-	it("reuses today's forecast for three hours and its satellite readings for one", async () => {
+	it("reuses today's forecast for three hours", async () => {
 		const fetch = mockOpenMeteo();
 		await getProduction();
-		vi.setSystemTime(NOW + 30 * MINUTE);
+		vi.setSystemTime(NOW + 179 * MINUTE);
 		await getProduction();
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([1, 1]);
-
-		vi.setSystemTime(NOW + 61 * MINUTE);
-		await getProduction();
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([1, 2]);
+		expect(callsTo(fetch, FORECAST)).toHaveLength(1);
 
 		vi.setSystemTime(NOW + 181 * MINUTE);
 		await getProduction();
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 3]);
+		expect(callsTo(fetch, FORECAST)).toHaveLength(2);
+	});
+
+	it("refreshes the satellite every half hour from 10am to 4pm, and hourly otherwise", async () => {
+		const fetch = mockOpenMeteo();
+		const satelliteCallsAt = async (clock: string) => {
+			vi.setSystemTime(Date.parse(`2026-10-26T${clock}:00+13:00`));
+			await getProduction();
+			return callsTo(fetch, SATELLITE).length;
+		};
+
+		expect(await satelliteCallsAt("09:00")).toBe(1);
+		expect(await satelliteCallsAt("09:45")).toBe(1);
+		expect(await satelliteCallsAt("10:05")).toBe(2);
+		expect(await satelliteCallsAt("10:30")).toBe(2);
+		expect(await satelliteCallsAt("10:40")).toBe(3);
+		expect(await satelliteCallsAt("15:50")).toBe(4);
+		expect(await satelliteCallsAt("16:25")).toBe(4);
+		expect(await satelliteCallsAt("16:55")).toBe(5);
 	});
 
 	it("uses satellite readings for what has already happened, fading into the forecast", async () => {
@@ -225,6 +246,42 @@ describe("GET /solar-production[/{date}]", () => {
 		expect(latitudes).toEqual(
 			[...gxpLocations.gxps.ISL.pixels, ...gxpLocations.gxps.ASB.pixels].map(([lat]) => lat.toFixed(4)),
 		);
+	});
+
+	it("asks once for a pixel neighbouring GXPs share, and gives its readings to both", async () => {
+		// Bromley's and Kaiapoi's people both live in the pixel at (-43.475, 172.625).
+		await env.DB.batch([
+			env.DB.prepare(
+				`INSERT INTO gxps (site_id, name, type, island, lat, long) VALUES
+				('BRY', 'Bromley', 'ACSTN', 'south', -43.53, 172.67),
+				('KAI', 'Kaiapoi', 'ACSTN', 'south', -43.41, 172.64)`,
+			),
+			env.DB.prepare(
+				`INSERT INTO solar_capacity (nsp, gxp, month_end, icp_count, installed_mw, dispatched_mw) VALUES
+				('BRY0661ORONGN', 'BRY', '2026-09-30', 1000, 10, 0),
+				('KAI0111ORONGN', 'KAI', '2026-09-30', 1000, 10, 0)`,
+			),
+		]);
+		// Only the shared pixel sees any sun.
+		const fetch = mockOpenMeteo({ satelliteAt: (lat, long) => (`${lat},${long}` === "-43.4750,172.6250" ? 1000 : 0) });
+		const { result } = await getProduction();
+
+		const params = new URL(String(callsTo(fetch, SATELLITE)[0][0])).searchParams;
+		const longs = params.get("longitude")!.split(",");
+		const asked = params.get("latitude")!.split(",").map((lat, i) => `${lat},${longs[i]}`);
+		const locations: Record<string, { pixels: number[][] }> = gxpLocations.gxps;
+		const wanted = ["ISL", "ASB", "BRY", "KAI"].flatMap((gxp) =>
+			locations[gxp].pixels.map(([lat, long]) => `${lat.toFixed(4)},${long.toFixed(4)}`),
+		);
+		expect(callsTo(fetch, SATELLITE)).toHaveLength(1);
+		expect(asked).toHaveLength(19);
+		expect(new Set(asked)).toEqual(new Set(wanted));
+
+		const nineAm = result.profileTimes.indexOf("2026-10-25T20:00:00.000Z");
+		const outputs = Object.fromEntries(result.gxps.map((gxp: any) => [gxp.gxp, gxp.profileMw[nineAm]]));
+		expect(outputs).toMatchObject({ ISL: 0, ASB: 0 });
+		expect(outputs.BRY).toBeGreaterThan(0);
+		expect(outputs.KAI).toBeGreaterThan(0);
 	});
 
 	it("falls back to the forecast when the satellite fails", async () => {
