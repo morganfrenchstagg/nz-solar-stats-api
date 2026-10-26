@@ -1,7 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { averagePixels, blendIrradiance, BRIDGE_MS, pixelsAround, weatherPoints } from "../../src/production/blend";
+import {
+	averagePixels,
+	blendIrradiance,
+	BRIDGE_MS,
+	pixelsAround,
+	resample,
+	stepsThrough,
+	weatherPoints,
+} from "../../src/production/blend";
 
 const MINUTE = 60 * 1000;
+
+describe("stepsThrough", () => {
+	it("covers a 15-minute forecast's day in 10-minute steps", () => {
+		const day = Array.from({ length: 96 }, (_, i) => i * 15 * MINUTE);
+		const steps = stepsThrough(day);
+		expect(steps).toHaveLength(144);
+		expect([steps[0], steps[1], steps[143]]).toEqual([0, 10 * MINUTE, 23 * 60 * MINUTE + 50 * MINUTE]);
+	});
+});
+
+describe("resample", () => {
+	it("interpolates between readings and holds the ends", () => {
+		const times = [0, 15 * MINUTE, 30 * MINUTE];
+		expect(resample(times, [0, 300, 600], [-MINUTE, 0, 10 * MINUTE, 15 * MINUTE, 20 * MINUTE, 40 * MINUTE])).toEqual([
+			0, 0, 200, 300, 400, 600,
+		]);
+	});
+});
 
 describe("pixelsAround", () => {
 	it("uses five pixels for bigger GXPs and one for small ones", () => {

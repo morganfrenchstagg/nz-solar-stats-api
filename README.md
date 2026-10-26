@@ -42,8 +42,8 @@ Endpoints:
 
 - `GET /solar-capacity?month=YYYY-MM`: every GXP at a month end (latest by default), with a national total
 - `GET /solar-capacity/{gxp}`: one GXP's monthly history, plus the dispatched farm steps removed from it
-- `GET /solar-production`: a live estimate of every GXP's distributed solar output now, with a 15-minute profile for today (NZ time)
-- `GET /solar-production/{date}`: the same 15-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), from about three months ago to two weeks ahead (as far as Open-Meteo has weather). Only today has live values.
+- `GET /solar-production`: a live estimate of every GXP's distributed solar output now, with a 10-minute profile for today (NZ time)
+- `GET /solar-production/{date}`: the same 10-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), from about three months ago to two weeks ahead (as far as Open-Meteo has weather). Only today has live values.
 
 EMI only publishes month-end snapshots, a few weeks after each month. So each GXP's capacity on a date is its latest snapshot on or before it, plus growth since at its recent rate (`src/production/capacity.ts`): an exponentially weighted average of the last year's month-on-month changes, each counting half as much as one three months newer. Farm-sized steps that aren't dispatched, such as Rānui's 10 MW at Blenheim, are stored as `step_mw` and left out of the rate, since they're one-offs. Predicting each month-end from the one before over 2024–26, this cut the NZ total's miss from 13.1 MW (always short) to 2.9 MW, and the average GXP's from 0.127 to 0.084 MW.
 
@@ -65,7 +65,9 @@ Weather is taken where each GXP's customers live, not at its substation, which c
 Sunlight (global horizontal, direct normal and diffuse) comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`), each component blended separately:
 
 - For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, about half an hour behind. GXPs of 5 MW or more average their five most-populated pixels, weighted by population; smaller ones use their most-populated pixel.
-- After the latest reading, the 15-minute forecast. How cloudy the last reading was compared with the forecast fades out over two hours, so the two don't jump apart.
+- After the latest reading, the forecast. How cloudy the last reading was compared with the forecast fades out over two hours, so the two don't jump apart.
+
+The estimate runs every 10 minutes, the satellite's own interval, so its readings are used as they are. Finer would only be interpolation. Open-Meteo's forecast is hourly underneath (it only has true 15-minute data for Europe and North America, interpolating elsewhere), so after the latest reading the profile is smooth between hours.
 
 The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 

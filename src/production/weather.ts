@@ -1,4 +1,4 @@
-import { averagePixels, blendIrradiance, type WeatherPoints } from "./blend";
+import { averagePixels, blendIrradiance, resample, stepsThrough, type WeatherPoints } from "./blend";
 
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archive";
@@ -38,7 +38,7 @@ export interface WeatherLocation extends WeatherPoints {
 
 type Component = (typeof COMPONENTS)[number];
 
-// A location's 15-minute weather: sunlight in each component and the air
+// A location's weather at each step: sunlight in each component and the air
 // temperature, at a point whose sun position the tilt maths uses.
 export interface LocationWeather extends Record<Component, number[]> {
 	lat: number;
@@ -46,7 +46,7 @@ export interface LocationWeather extends Record<Component, number[]> {
 	temperatureC: number[];
 }
 
-// A day's 15-minute weather at each location.
+// A day's weather at each location, every 10 minutes (see STEP_MS).
 export interface DayWeather {
 	date: string; // NZ date, YYYY-MM-DD
 	fetchedAt: string;
@@ -60,6 +60,7 @@ export interface DayWeather {
 // satellitePixels), so a cached day is refetched once a GXP's points move.
 type TakenAt = Record<string, string>;
 
+// Open-Meteo's 15-minute forecast, as cached.
 type Forecast = Omit<DayWeather, "observedUntil"> & { format: number; points: TakenAt };
 
 // Each location's satellite irradiance, averaged over its pixels, every 10 minutes.
@@ -102,27 +103,33 @@ export async function getWeather(
 	now: Date,
 ): Promise<DayWeather> {
 	const forecast = await getForecast(db, locations, date, now);
+	const times = stepsThrough(forecast.times);
+	const onSteps = (values: number[]) => resample(forecast.times, values, times);
+	const day = { date, fetchedAt: forecast.fetchedAt, times };
 	const satellite = await getSatellite(db, locations, date, now, forecast);
-	if (!satellite) return { ...forecast, observedUntil: null };
 
 	let observedUntil: number | null = null;
 	const blended = Object.fromEntries(
 		locations.map(({ id }) => {
-			const location = { ...forecast.locations[id] };
+			const cached = forecast.locations[id];
+			const location: LocationWeather = {
+				lat: cached.lat,
+				long: cached.long,
+				temperatureC: onSteps(cached.temperatureC),
+				ghiWm2: onSteps(cached.ghiWm2),
+				dniWm2: onSteps(cached.dniWm2),
+				dhiWm2: onSteps(cached.dhiWm2),
+			};
+			if (!satellite) return [id, location];
 			for (const component of COMPONENTS) {
-				const blend = blendIrradiance(
-					satellite.times,
-					satellite.locations[id][component],
-					forecast.times,
-					location[component],
-				);
+				const blend = blendIrradiance(satellite.times, satellite.locations[id][component], times, location[component]);
 				location[component] = blend.irradianceWm2;
 				if (blend.observedUntil !== null) observedUntil = Math.max(observedUntil ?? 0, blend.observedUntil);
 			}
 			return [id, location];
 		}),
 	);
-	return { ...forecast, locations: blended, observedUntil };
+	return { ...day, locations: blended, observedUntil };
 }
 
 async function getForecast(

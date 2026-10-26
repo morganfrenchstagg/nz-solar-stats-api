@@ -185,7 +185,7 @@
 		<p>
 			Rooftops are modelled as a mix of roofs facing north, north-east, north-west, east and west, fitted to NZ rooftops on PVOutput, and farm-sized steps in capacity as fixed north-facing farms, with weather
 			taken where its customers live rather than at the substation. Irradiance is from Himawari satellite readings
-			for times that have passed (about half an hour behind), and the 15-minute forecast after that. Capacities are registry nameplate MW AC, net of dispatched solar
+			every 10 minutes for times that have passed (about half an hour behind), and the forecast after that (hourly, smoothed between hours). Capacities are registry nameplate MW AC, net of dispatched solar
 			farms. Data from the <a href="/">NZ Solar Stats API</a>.
 		</p>
 		<p>
@@ -198,7 +198,6 @@
 <script>
 	const API_URL = "/solar-production";
 	const REFRESH_MS = 5 * 60 * 1000;
-	const INTERVAL_MS = 15 * 60 * 1000;
 	const SVG_NS = "http://www.w3.org/2000/svg";
 	const NZ = "Pacific/Auckland";
 
@@ -221,6 +220,7 @@
 
 	let data = null;
 	let times = [];
+	let intervalMs = 10 * 60 * 1000; // between profile times, from the data
 	let chart = null; // scales and series of the current render, for hover
 	let hoverIndex = null;
 	let latestLoad = 0;
@@ -247,6 +247,7 @@
 			if (!res.ok) throw new Error((body.errors && body.errors[0] && body.errors[0].message) || "HTTP " + res.status);
 			data = body.result;
 			times = data.profileTimes.map((time) => Date.parse(time));
+			intervalMs = times[1] - times[0];
 			fillOptions();
 			render();
 			setStatus("");
@@ -290,7 +291,7 @@
 		const series = selectedSeries();
 		const profile = series.profileMw;
 		const peakIndex = profile.reduce((best, mw, index) => (mw > profile[best] ? index : best), 0);
-		const energyMwh = profile.reduce((sum, mw) => sum + mw, 0) * (INTERVAL_MS / 3600000);
+		const energyMwh = profile.reduce((sum, mw) => sum + mw, 0) * (intervalMs / 3600000);
 		const estimatedAt = Date.parse(data.time);
 		// Only today has a live value; a past day is shown whole.
 		const isLive = series.productionMw !== null;
@@ -359,7 +360,7 @@
 		const plotHeight = 240;
 		const height = margin.top + plotHeight + margin.bottom;
 		const start = times[0];
-		const end = times[times.length - 1] + INTERVAL_MS;
+		const end = times[times.length - 1] + intervalMs;
 		// The y-axis runs to the GXP's capacity, so the curve shows how hard it's working.
 		const step = niceStep(series.distributedMw, 4);
 		const ticks = Math.ceil(series.distributedMw / step - 1e-9);
@@ -411,7 +412,7 @@
 		hit.addEventListener("pointermove", (event) => {
 			const bounds = svg.getBoundingClientRect();
 			const time = start + ((event.clientX - bounds.left - margin.left) / (width - margin.left - margin.right)) * (end - start);
-			showPoint(Math.round((time - start) / INTERVAL_MS));
+			showPoint(Math.round((time - start) / intervalMs));
 		});
 		hit.addEventListener("pointerleave", hidePoint);
 
@@ -451,7 +452,7 @@
 
 	plot.addEventListener("focus", () => {
 		if (!chart) return;
-		const nowIndex = Math.floor((chart.estimatedAt - times[0]) / INTERVAL_MS);
+		const nowIndex = Math.floor((chart.estimatedAt - times[0]) / intervalMs);
 		showPoint(nowIndex >= 0 && nowIndex < times.length ? nowIndex : chart.peakIndex);
 	});
 	plot.addEventListener("blur", hidePoint);

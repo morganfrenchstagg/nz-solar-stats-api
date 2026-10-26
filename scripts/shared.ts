@@ -1,9 +1,14 @@
 // Helpers shared by the backtest scripts.
-import { averagePixels, blendIrradiance, type WeatherPoints } from "../src/production/blend.ts";
+import {
+	averagePixels,
+	blendIrradiance,
+	resample,
+	STEP_MS,
+	stepsThrough,
+	type WeatherPoints,
+} from "../src/production/blend.ts";
 import { estimateOutputMw, type SolarCapacity } from "../src/production/estimate.ts";
 import { type Sky, type Sun, sunAt } from "../src/production/solar.ts";
-
-export const QUARTER_HOUR_MS = 15 * 60 * 1000;
 
 // Days are classed by their clearness index: the share of top-of-atmosphere
 // sunlight that reached the ground.
@@ -32,10 +37,10 @@ export type WeatherSource = "satellite" | "forecast";
 
 type Series = Record<string, (number | null)[]> & { time: number[] };
 
-// 15-minute weather for a GXP or site, a day either side of the range so
-// every period has both ends: the forecast (and always the temperature) at
-// `points.forecast`, and satellite readings averaged over `points.pixels` by
-// their weights, as the API does.
+// Weather every 10 minutes (STEP_MS) for a GXP or site, a day either side of
+// the range so every period has both ends: the forecast (and always the
+// temperature) at `points.forecast`, and satellite readings averaged over
+// `points.pixels` by their weights, as the API does.
 export async function fetchWeather(
 	points: WeatherPoints,
 	from: string,
@@ -53,7 +58,10 @@ export async function fetchWeather(
 		...range,
 	});
 	const forecastTimes = forecast.time.map((seconds) => seconds * 1000);
-	let [ghi, dni, dhi] = SKY_VARIABLES.map((variable) => forecast[variable] as number[]);
+	const times = stepsThrough(forecastTimes);
+	const onSteps = (variable: string) => resample(forecastTimes, forecast[variable] as number[], times);
+	let [ghi, dni, dhi] = SKY_VARIABLES.map(onSteps);
+	const [temperature, topOfAtmosphere] = ["temperature_2m", "terrestrial_radiation_instant"].map(onSteps);
 
 	if (source === "satellite") {
 		const pixels = await getSeries("https://satellite-api.open-meteo.com/v1/archive", "hourly", points.pixels, {
@@ -72,19 +80,19 @@ export async function fetchWeather(
 					pixels.map((pixel) => pixel[variable]),
 					points.pixels.map((pixel) => pixel.weight),
 				),
-				forecastTimes,
+				times,
 				fallback,
 			).irradianceWm2;
 		[ghi, dni, dhi] = [blend(SKY_VARIABLES[0], ghi), blend(SKY_VARIABLES[1], dni), blend(SKY_VARIABLES[2], dhi)];
 	}
 
 	const weather: Weather = new Map();
-	forecastTimes.forEach((time, i) => {
+	times.forEach((time, i) => {
 		weather.set(time, {
 			sky: { ghiWm2: ghi[i], dniWm2: dni[i], dhiWm2: dhi[i] },
 			sun: sunAt(time, points.forecast.lat, points.forecast.long),
-			temperatureC: forecast.temperature_2m[i]!,
-			topOfAtmosphereWm2: forecast.terrestrial_radiation_instant[i]!,
+			temperatureC: temperature[i],
+			topOfAtmosphereWm2: topOfAtmosphere[i],
 		});
 	});
 	return weather;
@@ -132,16 +140,16 @@ function instantAt(weather: Weather, time: number): Instant {
 	return instant;
 }
 
-// The model's energy between two quarter-hour instants, in kWh, by the
-// trapezoid rule over the 15-minute weather.
+// The model's energy between two 10-minute instants, in kWh, by the
+// trapezoid rule over the weather's steps.
 export function modelKwh(weather: Weather, start: number, end: number, capacity: SolarCapacity): number {
 	let kwh = 0;
-	for (let time = start; time < end; time += QUARTER_HOUR_MS) {
-		const [from, to] = [time, time + QUARTER_HOUR_MS].map((t) => {
+	for (let time = start; time < end; time += STEP_MS) {
+		const [from, to] = [time, time + STEP_MS].map((t) => {
 			const { sky, sun, temperatureC } = instantAt(weather, t);
 			return estimateOutputMw(capacity, sky, sun, temperatureC);
 		});
-		kwh += ((from + to) / 2) * 1000 * 0.25;
+		kwh += ((from + to) / 2) * 1000 * (STEP_MS / 3_600_000);
 	}
 	return kwh;
 }
@@ -149,7 +157,7 @@ export function modelKwh(weather: Weather, start: number, end: number, capacity:
 export function clearnessIndex(weather: Weather, date: string): number {
 	let ground = 0;
 	let topOfAtmosphere = 0;
-	for (let time = nzMidnight(date); time < nzMidnight(shiftDate(date, 1)); time += QUARTER_HOUR_MS) {
+	for (let time = nzMidnight(date); time < nzMidnight(shiftDate(date, 1)); time += STEP_MS) {
 		ground += instantAt(weather, time).sky.ghiWm2;
 		topOfAtmosphere += instantAt(weather, time).topOfAtmosphereWm2;
 	}

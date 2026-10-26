@@ -137,8 +137,8 @@ describe("GET /solar-production[/{date}]", () => {
 			// 58.787 MW of rooftops under 1000 W/m² of overcast at 25 °C
 			total: { distributedMw: 83.561, productionMw: 49.414 },
 		});
-		expect(result.profileTimes).toHaveLength(96);
-		expect(result.total.profileMw).toEqual(Array(96).fill(49.414));
+		expect(result.profileTimes).toHaveLength(144);
+		expect(result.total.profileMw).toEqual(Array(144).fill(49.414));
 		expect(result.gxps.map((gxp: any) => [gxp.gxp, gxp.distributedMw, gxp.productionMw])).toEqual([
 			["ISL", 58.787, 49.414],
 			["ASB", 24.774, 0],
@@ -227,7 +227,7 @@ describe("GET /solar-production[/{date}]", () => {
 			date: "2026-10-25",
 			total: { distributedMw: 83.561, productionMw: null },
 		});
-		expect(result.total.profileMw).toEqual(Array(96).fill(49.414));
+		expect(result.total.profileMw).toEqual(Array(144).fill(49.414));
 		expect(result.gxps[0]).toMatchObject({
 			gxp: "ISL",
 			productionMw: null,

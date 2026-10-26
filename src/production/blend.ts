@@ -58,6 +58,34 @@ const PIXEL_OFFSETS: [number, number][] = [
 	[0, 0.06],
 	[0, -0.06],
 ];
+// The estimate's steps: the satellite's own interval, so its readings are used
+// as they are. The forecast is hourly underneath (Open-Meteo interpolates its
+// 15-minute data outside Europe and North America) and is interpolated onto
+// these steps too.
+export const STEP_MS = 10 * 60 * 1000;
+
+// Steps from the first of a forecast's evenly spaced times to the end of its
+// last interval, e.g. an NZ day's 144.
+export function stepsThrough(times: number[]): number[] {
+	const end = times[times.length - 1] + (times[1] - times[0]);
+	const steps: number[] = [];
+	for (let time = times[0]; time < end; time += STEP_MS) steps.push(time);
+	return steps;
+}
+
+// A time-sorted series' values at other time-sorted instants, by linear
+// interpolation, holding the end values.
+export function resample(times: number[], values: number[], at: number[]): number[] {
+	let i = 1;
+	return at.map((time) => {
+		if (time <= times[0]) return values[0];
+		while (i < times.length - 1 && times[i] < time) i++;
+		if (time >= times[i]) return values[i];
+		const share = (time - times[i - 1]) / (times[i] - times[i - 1]);
+		return values[i - 1] + share * (values[i] - values[i - 1]);
+	});
+}
+
 // After the latest satellite reading, how its cloudiness compares with the
 // forecast fades away over this long, so the two don't jump apart.
 export const BRIDGE_MS = 2 * 60 * 60 * 1000;
