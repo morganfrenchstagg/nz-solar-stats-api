@@ -5,7 +5,9 @@
 //
 // Each hexagon of Kontur's 400 m population grid goes to its nearest GXP with
 // distributed solar: a stand-in for the real supply areas, which aren't
-// published. For each GXP this writes the population-weighted centre and its
+// published. Hexagons far from every GXP, on the Chathams, Kermadecs and
+// subantarctic islands, are off the national grid and left out. For each GXP
+// this writes the population-weighted centre and its
 // most-populated satellite pixels (with their share of its people) to
 // src/production/gxpLocations.json. Rerun it when GXPs change.
 //
@@ -27,7 +29,12 @@ const OUT = new URL("../src/production/gxpLocations.json", import.meta.url);
 const PIXEL_DEGREES = 0.05;
 // The most any GXP averages, matching the API's pixel budget.
 const PIXELS_PER_GXP = 5;
+// The main islands' most remote people (around Cape Reinga) are within 150 km
+// of a GXP; the closest of the far-flung islands, the Aucklands, is 480 km
+// from one.
+const MAX_GXP_DISTANCE_KM = 200;
 const EARTH_RADIUS_M = 6378137;
+const KM_PER_DEGREE = (EARTH_RADIUS_M / 1000) * (Math.PI / 180);
 
 const args = process.argv.slice(2);
 const option = (name: string, fallback: string) => {
@@ -57,9 +64,12 @@ for (const row of db.prepare("SELECT geom, population FROM population").iterate(
 	const [minX, maxX, minY, maxY] = [0, 1, 2, 3].map((i) => view.getFloat64(8 + i * 8, (flags & 1) === 1));
 	const x = (minX + maxX) / 2;
 	const y = (minY + maxY) / 2;
+	const long = ((x / EARTH_RADIUS_M) * 180) / Math.PI;
 	hexagons.push({
 		lat: ((2 * Math.atan(Math.exp(y / EARTH_RADIUS_M)) - Math.PI / 2) * 180) / Math.PI,
-		long: ((x / EARTH_RADIUS_M) * 180) / Math.PI,
+		// East of 180° rather than −180°, so the Chathams aren't measured the
+		// long way round the world.
+		long: long < 0 ? long + 360 : long,
 		population: row.population as number,
 	});
 }
@@ -75,14 +85,17 @@ const gxps = capacity.result.gxps
 	.filter((substation) => substation !== undefined);
 
 const assigned = new Map<string, typeof hexagons>();
+const offGrid = { hexagons: 0, population: 0 };
 for (const hexagon of hexagons) {
 	const scale = Math.cos((hexagon.lat * Math.PI) / 180);
-	const nearest = gxps.reduce((best, gxp) =>
-		(gxp.lat - hexagon.lat) ** 2 + ((gxp.long - hexagon.long) * scale) ** 2 <
-		(best.lat - hexagon.lat) ** 2 + ((best.long - hexagon.long) * scale) ** 2
-			? gxp
-			: best,
-	);
+	const km = (gxp: (typeof gxps)[number]) =>
+		Math.hypot(gxp.lat - hexagon.lat, (gxp.long - hexagon.long) * scale) * KM_PER_DEGREE;
+	const nearest = gxps.reduce((best, gxp) => (km(gxp) < km(best) ? gxp : best));
+	if (km(nearest) > MAX_GXP_DISTANCE_KM) {
+		offGrid.hexagons++;
+		offGrid.population += hexagon.population;
+		continue;
+	}
 	assigned.set(nearest.siteId, [...(assigned.get(nearest.siteId) ?? []), hexagon]);
 }
 
@@ -128,3 +141,4 @@ writeFileSync(
 	].join("\n"),
 );
 console.log(`Wrote ${Object.keys(locations).length} GXPs (${hexagons.length} hexagons) to ${OUT.pathname}`);
+console.log(`Left out ${offGrid.hexagons} hexagons (${Math.round(offGrid.population)} people) over ${MAX_GXP_DISTANCE_KM} km from any GXP`);
