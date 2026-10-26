@@ -60,7 +60,7 @@ Irradiance comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/pr
 
 The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 
-Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
+Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good. Each cached day records where every GXP's weather was taken, so it's refetched once a GXP's points move: when `gxpLocations.json` is rebuilt, or a GXP grows past 5 MW and gets five pixels. A day Open-Meteo no longer has keeps its weather from the old points. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
 
 ### Backtesting
 
