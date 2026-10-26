@@ -6,8 +6,10 @@
 // Needs PVOUTPUT_API_KEY and PVOUTPUT_SYSTEM_ID, e.g. in .env. Without
 // --systems it searches for systems within --radius km of the GXP (default 25).
 // Other people's systems need Donation mode on your PVOutput account; your own
-// doesn't. --out <file> writes a CSV of system-days. Dates default to the 60
-// days to yesterday; Open-Meteo only has weather for about three months back.
+// doesn't. --out <file> writes a CSV of system-days, and --weather
+// satellite|forecast picks the irradiance (default satellite, as the API
+// does). Dates default to the 60 days to yesterday; Open-Meteo only has
+// forecast temperatures for about three months back.
 //
 // PVOutput records gross generation, so unlike EMI's exports the ratio here is
 // a direct check on the model. Each system is modelled at its own location,
@@ -26,6 +28,7 @@ import {
 	shiftDate,
 	SKIES,
 	skyOf,
+	type WeatherSource,
 } from "./shared.ts";
 
 // Requests for one system: its details, then up to two of daily outputs.
@@ -59,9 +62,12 @@ const systemIds = option("systems", "");
 const to = option("to", shiftDate(nzDate(Date.now()), -1));
 const from = option("from", shiftDate(to, -59));
 const outPath = option("out", "");
+const weatherSource = option("weather", "satellite") as WeatherSource;
 const [gxp] = args;
-if (!gxp) {
-	console.error("Usage: npm run backtest:pvoutput -- <GXP> [--systems id,id] [--radius km] [--from date] [--to date] [--out file]");
+if (!gxp || !["satellite", "forecast"].includes(weatherSource)) {
+	console.error(
+		"Usage: npm run backtest:pvoutput -- <GXP> [--systems id,id] [--radius km] [--from date] [--to date] [--weather satellite|forecast] [--out file]",
+	);
 	process.exit(1);
 }
 
@@ -117,7 +123,9 @@ for (const systemId of candidates) {
 		const info = await client.system(systemId);
 		const outputs = await client.outputs(systemId, from, to);
 		const nameplateKw = Math.min(info.sizeW, info.inverterW ?? Infinity) / 1000;
-		const weather = await fetchWeather(info.lat, info.long, from, to);
+		// A single system sits on one satellite pixel.
+		const system = { lat: info.lat, long: info.long };
+		const weather = await fetchWeather({ forecast: system, pixels: [{ ...system, weight: 1 }] }, from, to, { source: weatherSource });
 		const days = outputs
 			// A day with nothing generated is an outage or a missed upload, not weather.
 			.filter((output) => output.generatedWh && output.date >= from && output.date <= to)

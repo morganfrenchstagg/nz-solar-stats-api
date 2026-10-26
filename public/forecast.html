@@ -183,12 +183,15 @@
 
 	<footer>
 		<p>
-			A first-cut model: each GXP's distributed solar is treated as one north-facing array tilted 20°. Irradiance
-			is from Himawari satellite readings around the GXP for times that have passed (about half an hour behind),
-			and the 15-minute forecast after that. Capacities are registry nameplate MW AC, net of dispatched solar
+			A first-cut model: each GXP's distributed solar is treated as one north-facing array tilted 20°, with weather
+			taken where its customers live rather than at the substation. Irradiance is from Himawari satellite readings
+			for times that have passed (about half an hour behind), and the 15-minute forecast after that. Capacities are registry nameplate MW AC, net of dispatched solar
 			farms. Data from the <a href="/">NZ Solar Stats API</a>.
 		</p>
-		<p>Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0); satellite data from JMA/JAXA Himawari.</p>
+		<p>
+			Weather data by <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0); satellite data from JMA/JAXA
+			Himawari; population from <a href="https://www.kontur.io/portfolio/population-dataset/">Kontur</a> (CC BY 4.0).
+		</p>
 	</footer>
 </main>
 

@@ -49,14 +49,16 @@ Endpoints:
 
 The production estimate is a first-cut model. Each GXP's latest distributed capacity is treated as one north-facing array tilted 20° (constants in `src/production/estimate.ts`). Because real roofs face every way, it likely overstates the midday peak on clear days.
 
+Weather is taken where each GXP's customers live, not at its substation, which can be well out of town (Mangahao's sits in the Tararua foothills, 13 km from Levin). `npm run gxp-locations` builds `src/production/gxpLocations.json` from [Kontur](https://www.kontur.io/portfolio/population-dataset/)'s 400 m population grid, assigning each hexagon to its nearest GXP: each GXP's population-weighted centre and its five most-populated satellite pixels. Rerun it when GXPs change; a GXP missing from it falls back to its substation.
+
 Irradiance comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`):
 
-- For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, about half an hour behind. GXPs of 5 MW or more average five pixels (their own and four ~5 km away); smaller ones use their own.
+- For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, about half an hour behind. GXPs of 5 MW or more average their five most-populated pixels, weighted by population; smaller ones use their most-populated pixel.
 - After the latest reading, the 15-minute forecast. How cloudy the last reading was compared with the forecast fades out over two hours, so the two don't jump apart.
 
-Temperature is always from the forecast. If the satellite fails, the estimate falls back to the forecast.
+The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 
-Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari.
+Weather is cached in D1 per date. The forecast is refreshed at most every three hours and the satellite at most hourly while the sun's up; a past day's of each is kept for good. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one: a day of steady use takes about 6,000, and each new past date about 470. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
 
 ### Backtesting
 
@@ -64,9 +66,12 @@ Weather is cached in D1 per date. The forecast is refreshed at most every three 
 
 ```bash
 npm run backtest -- MHO0331 202608_Embedded_generation.csv 202609_Embedded_generation.csv --out mho0331.csv
+npm run backtest -- farms 202608_Embedded_generation.csv 202609_Embedded_generation.csv
 ```
 
-It runs the same model code as the API, takes capacity from the API (`--api`, default the local dev server) and weather from Open-Meteo for the GXP, and picks out solar retailers as those exporting under 5% of their energy at night. It also breaks results down by sky: each day is classed as cloudy, partly cloudy or sunny by its clearness index (the share of top-of-atmosphere sunlight reaching the ground, below 0.4, 0.4–0.6, or 0.6 and above). Metered injection is what ICPs export after using their own solar, so it sits below modelled generation; the correlations and average-day shape are the fair test. Open-Meteo's forecast API only goes back about three months, so older months can't be backtested this way.
+It runs the same model, weather blend and population-weighted locations as the API (or `--weather forecast` for the forecast alone), takes capacity from the API (`--api`, default the local dev server), and picks out solar retailers as those exporting under 5% of their energy at night. It also breaks results down by sky: each day is classed as cloudy, partly cloudy or sunny by its clearness index (the share of top-of-atmosphere sunlight reaching the ground, below 0.4, 0.4–0.6, or 0.6 and above). Metered injection is what ICPs export after using their own solar, so it sits below modelled generation; the correlations and average-day shape are the fair test. Open-Meteo's forecast API, which the temperatures come from, only goes back about three months, so older months can't be backtested this way.
+
+`farms` compares the dispatched solar farms in the files instead, each modelled at its own location and dispatch capacity on its own satellite pixel. Farms export everything they generate, so they check the model's level and the weather without self-consumption getting in the way. Timing is compared by each day's energy-weighted middle rather than its peak, which flat-topped farms make arbitrary.
 
 `scripts/backtest-pvoutput.ts` does the same against [PVOutput](https://pvoutput.org/) systems' daily generation, which is gross output rather than exports, so its ratio is a direct check on the model:
 

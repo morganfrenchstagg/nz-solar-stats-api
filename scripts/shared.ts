@@ -1,4 +1,5 @@
 // Helpers shared by the backtest scripts.
+import { averagePixels, blendIrradiance, type WeatherPoints } from "../src/production/blend.ts";
 import {
 	estimateOutputMw,
 	PANEL_AZIMUTH_DEGREES,
@@ -28,49 +29,100 @@ export interface Instant {
 
 export type Weather = Map<number, Instant>; // keyed by epoch ms
 
-// 15-minute weather at a location from Open-Meteo, using the same variables
-// the API does, a day either side of the range so every period has both ends.
-export async function fetchWeather(lat: number, long: number, from: string, to: string): Promise<Weather> {
-	const params = new URLSearchParams({
-		latitude: lat.toFixed(4),
-		longitude: long.toFixed(4),
-		minutely_15:
-			"global_tilted_irradiance_instant,temperature_2m,shortwave_radiation_instant,terrestrial_radiation_instant",
+// "satellite" is what the API does: Himawari readings for times that have
+// passed, the forecast after. "forecast" is the forecast alone, for comparison.
+export type WeatherSource = "satellite" | "forecast";
+
+type Series = Record<string, (number | null)[]> & { time: number[] };
+
+// 15-minute weather for a GXP or site, a day either side of the range so
+// every period has both ends: the forecast (and always the temperature) at
+// `points.forecast`, and satellite readings averaged over `points.pixels` by
+// their weights, as the API does.
+export async function fetchWeather(
+	points: WeatherPoints,
+	from: string,
+	to: string,
+	{ source = "satellite" }: { source?: WeatherSource } = {},
+): Promise<Weather> {
+	const range = {
 		tilt: String(PANEL_TILT_DEGREES),
 		azimuth: String(PANEL_AZIMUTH_DEGREES),
 		timezone: "Pacific/Auckland",
 		start_date: shiftDate(from, -1),
 		end_date: shiftDate(to, 1),
 		timeformat: "unixtime",
+	};
+	const [forecast] = await getSeries("https://api.open-meteo.com/v1/forecast", "minutely_15", [points.forecast], {
+		minutely_15: "global_tilted_irradiance_instant,temperature_2m,shortwave_radiation_instant,terrestrial_radiation_instant",
+		...range,
 	});
-	// Open-Meteo sometimes sends a past day as all nulls, then has it moments later.
+	const forecastTimes = forecast.time.map((seconds) => seconds * 1000);
+	let tilted = forecast.global_tilted_irradiance_instant as number[];
+	let ground = forecast.shortwave_radiation_instant as number[];
+
+	if (source === "satellite") {
+		const pixels = await getSeries("https://satellite-api.open-meteo.com/v1/archive", "hourly", points.pixels, {
+			hourly: "global_tilted_irradiance_instant,shortwave_radiation_instant",
+			temporal_resolution: "native",
+			models: "jma_jaxa_himawari",
+			...range,
+			// The satellite archive has nothing after today.
+			end_date: [range.end_date, nzDate(Date.now())].sort()[0],
+		});
+		const satelliteTimes = pixels[0].time.map((seconds) => seconds * 1000);
+		const blend = (variable: string, fallback: number[]) =>
+			blendIrradiance(
+				satelliteTimes,
+				averagePixels(
+					pixels.map((pixel) => pixel[variable]),
+					points.pixels.map((pixel) => pixel.weight),
+				),
+				forecastTimes,
+				fallback,
+			).irradianceWm2;
+		tilted = blend("global_tilted_irradiance_instant", tilted);
+		ground = blend("shortwave_radiation_instant", ground);
+	}
+
+	const weather: Weather = new Map();
+	forecastTimes.forEach((time, i) => {
+		weather.set(time, {
+			irradianceWm2: tilted[i],
+			temperatureC: forecast.temperature_2m[i]!,
+			groundWm2: ground[i],
+			topOfAtmosphereWm2: forecast.terrestrial_radiation_instant[i]!,
+		});
+	});
+	return weather;
+}
+
+// One series per point. Open-Meteo sometimes sends a past day as all nulls,
+// then has it moments later, so a mostly-null response is retried. The
+// satellite's occasional missing reading is fine: the blend bridges it.
+async function getSeries(
+	url: string,
+	key: "minutely_15" | "hourly",
+	points: { lat: number; long: number }[],
+	params: Record<string, string>,
+): Promise<Series[]> {
+	const query = new URLSearchParams({
+		latitude: points.map((point) => point.lat.toFixed(4)).join(","),
+		longitude: points.map((point) => point.long.toFixed(4)).join(","),
+		...params,
+	});
 	for (let attempt = 1; ; attempt++) {
-		const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
-		const body = (await res.json()) as {
-			reason?: string;
-			minutely_15: Record<
-				"global_tilted_irradiance_instant" | "temperature_2m" | "shortwave_radiation_instant" | "terrestrial_radiation_instant",
-				(number | null)[]
-			> & { time: number[] };
-		};
+		const res = await fetch(`${url}?${query}`);
+		const body = (await res.json()) as { reason?: string } & Record<string, Series>;
 		if (!res.ok) throw new Error(`Open-Meteo: ${body.reason ?? res.status}`);
 
-		const { time, ...series } = body.minutely_15;
-		if (Object.values(series).some((values) => values.includes(null))) {
-			if (attempt === 4) throw new Error("Open-Meteo kept sending gaps; try again later");
-			await new Promise((resolve) => setTimeout(resolve, 10_000));
-			continue;
-		}
-		const weather: Weather = new Map();
-		time.forEach((seconds, i) => {
-			weather.set(seconds * 1000, {
-				irradianceWm2: series.global_tilted_irradiance_instant[i]!,
-				temperatureC: series.temperature_2m[i]!,
-				groundWm2: series.shortwave_radiation_instant[i]!,
-				topOfAtmosphereWm2: series.terrestrial_radiation_instant[i]!,
-			});
-		});
-		return weather;
+		const series = (Array.isArray(body) ? body : [body]).map((point) => point[key] as Series);
+		const values = series.flatMap(({ time, ...rest }) => Object.values(rest).flat());
+		const missing = values.filter((value) => value === null).length / values.length;
+		// The forecast should have no gaps at all.
+		if (missing <= (key === "minutely_15" ? 0 : 0.5)) return series;
+		if (attempt === 4) throw new Error("Open-Meteo kept sending gaps; try again later");
+		await new Promise((resolve) => setTimeout(resolve, 10_000));
 	}
 }
 

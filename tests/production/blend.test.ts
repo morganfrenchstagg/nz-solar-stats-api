@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { averagePixels, blendIrradiance, BRIDGE_MS, pixelsAround } from "../../src/production/blend";
+import { averagePixels, blendIrradiance, BRIDGE_MS, pixelsAround, weatherPoints } from "../../src/production/blend";
 
 const MINUTE = 60 * 1000;
 
@@ -10,9 +10,44 @@ describe("pixelsAround", () => {
 	});
 });
 
+describe("weatherPoints", () => {
+	const substation = { lat: -40.58, long: 175.45 };
+	const location = {
+		population: 35851,
+		centre: [-40.58, 175.29],
+		pixels: [[-40.625, 175.275, 0.46], [-40.475, 175.275, 0.09], [-40.625, 175.325, 0.08]],
+	};
+
+	it("takes the weather where a GXP's people are, weighted by population", () => {
+		expect(weatherPoints(substation, location, 20)).toEqual({
+			forecast: { lat: -40.58, long: 175.29 },
+			pixels: [
+				{ lat: -40.625, long: 175.275, weight: 0.46 },
+				{ lat: -40.475, long: 175.275, weight: 0.09 },
+				{ lat: -40.625, long: 175.325, weight: 0.08 },
+			],
+		});
+	});
+
+	it("uses only the most-populated pixel for a small GXP", () => {
+		expect(weatherPoints(substation, location, 4.8).pixels).toEqual([{ lat: -40.625, long: 175.275, weight: 0.46 }]);
+	});
+
+	it("falls back to the substation for a GXP without a population location", () => {
+		const points = weatherPoints(substation, undefined, 20);
+		expect(points.forecast).toEqual(substation);
+		expect(points.pixels).toHaveLength(5);
+		expect(points.pixels[0]).toEqual({ ...substation, weight: 1 });
+	});
+});
+
 describe("averagePixels", () => {
 	it("averages the pixels with readings", () => {
 		expect(averagePixels([[100, null, null], [300, 200, null]])).toEqual([200, 200, null]);
+	});
+
+	it("weights pixels by their share of the people", () => {
+		expect(averagePixels([[100, 100], [400, null]], [3, 1])).toEqual([175, 100]);
 	});
 });
 

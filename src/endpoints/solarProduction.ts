@@ -1,6 +1,7 @@
 import { ApiException, contentJson, NotFoundException, OpenAPIRoute } from "chanfana";
 import { z } from "zod";
 import { type GxpCapacity, estimateProduction, round } from "../production/estimate";
+import { gxpWeatherPoints, POPULATION_SOURCE } from "../production/locations";
 import {
 	getWeather,
 	nzDate,
@@ -35,7 +36,7 @@ const gxpProduction = production.extend({
 });
 
 const description =
-	"A first-cut model. Each GXP's distributed solar is treated as one north-facing array tilted 20°. Irradiance is from Himawari satellite readings (averaged over pixels around the GXP) for any time that has already happened, and Open-Meteo's 15-minute forecast after that; temperature is from the forecast.";
+	"A first-cut model. Each GXP's distributed solar is treated as one north-facing array tilted 20°, with weather taken where its customers live (from Kontur's population grid) rather than at the substation. Irradiance is from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) for any time that has already happened, and Open-Meteo's 15-minute forecast after that; temperature is from the forecast.";
 
 const responses = {
 	"200": {
@@ -124,7 +125,7 @@ async function estimateDay(db: D1Database, requested: string) {
 	try {
 		weather = await getWeather(
 			db,
-			gxps.map(({ gxp, lat, long, distributedMw }) => ({ id: gxp, lat, long, capacityMw: distributedMw })),
+			gxps.map(({ gxp, lat, long, distributedMw }) => ({ id: gxp, ...gxpWeatherPoints(gxp, { lat, long }, distributedMw) })),
 			date,
 			now,
 		);
@@ -148,7 +149,7 @@ async function estimateDay(db: D1Database, requested: string) {
 			capacityMonthEnd: gxps[0].monthEnd,
 			weatherFetchedAt: weather.fetchedAt,
 			observedUntil: weather.observedUntil === null ? null : new Date(weather.observedUntil).toISOString(),
-			attribution: "Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari",
+			attribution: `Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari; population from ${POPULATION_SOURCE}`,
 			profileTimes: weather.times.map((time) => new Date(time).toISOString()),
 			total: {
 				distributedMw: sum(estimates.map((estimate) => estimate.distributedMw)),

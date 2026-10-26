@@ -2,13 +2,55 @@
 // the forecast for the rest. Kept free of imports so the backtest scripts can
 // run it under Node too.
 
-// GXPs at least this big average five satellite pixels: their own and the
-// next one over in each direction (about 5–6 km away), so the estimate reflects
-// the area their rooftops spread over. Smaller GXPs use their own pixel, to
-// save Open-Meteo calls. Open-Meteo's bounding_box would average a whole area,
-// but it isn't supported for Himawari. The satellite grid is 0.05°, so smaller
-// offsets can land two points in the same pixel.
+// GXPs at least this big average up to five satellite pixels, so the estimate
+// reflects the area their rooftops spread over; smaller GXPs use one, to save
+// Open-Meteo calls. Open-Meteo's bounding_box would average a whole area, but
+// it isn't supported for Himawari.
 export const MULTI_PIXEL_MIN_MW = 5;
+
+export interface Pixel {
+	lat: number;
+	long: number;
+	weight: number;
+}
+
+// Where a GXP's customers are, from scripts/gxp-locations.ts: its population
+// centre and most-populated pixels as [lat, long, share of its people].
+export interface GxpLocation {
+	population: number;
+	centre: number[];
+	pixels: number[][];
+}
+
+export interface WeatherPoints {
+	forecast: { lat: number; long: number };
+	pixels: Pixel[];
+}
+
+// Where to take a GXP's weather: the forecast at its population centre, and
+// the satellite at its most-populated pixels, weighted by population. Without
+// a population location, at and around its substation.
+export function weatherPoints(
+	substation: { lat: number; long: number },
+	location: GxpLocation | undefined,
+	capacityMw: number,
+): WeatherPoints {
+	if (!location) {
+		return {
+			forecast: substation,
+			pixels: pixelsAround(substation.lat, substation.long, capacityMw).map((pixel) => ({ ...pixel, weight: 1 })),
+		};
+	}
+	const pixels = location.pixels.map(([lat, long, weight]) => ({ lat, long, weight }));
+	return {
+		forecast: { lat: location.centre[0], long: location.centre[1] },
+		pixels: capacityMw >= MULTI_PIXEL_MIN_MW ? pixels : pixels.slice(0, 1),
+	};
+}
+
+// Around a substation: its own pixel and the next one over in each direction
+// (about 5–6 km away). The satellite grid is 0.05°, so smaller offsets can
+// land two points in the same pixel.
 const PIXEL_OFFSETS: [number, number][] = [
 	[0, 0],
 	[0.05, 0],
@@ -28,11 +70,21 @@ export function pixelsAround(lat: number, long: number, capacityMw: number): { l
 	return offsets.map(([dLat, dLong]) => ({ lat: lat + dLat, long: long + dLong }));
 }
 
-// The mean of the pixels with a reading at each instant, or null if none has one.
-export function averagePixels(pixels: (number | null)[][]): (number | null)[] {
+// The weighted mean of the pixels with a reading at each instant, or null if
+// none has one. Two points in the same pixel just give it both their weights.
+export function averagePixels(
+	pixels: (number | null)[][],
+	weights: number[] = pixels.map(() => 1),
+): (number | null)[] {
 	return pixels[0].map((_, i) => {
-		const readings = pixels.map((pixel) => pixel[i]).filter((value): value is number => value !== null);
-		return readings.length === 0 ? null : readings.reduce((sum, value) => sum + value, 0) / readings.length;
+		let total = 0;
+		let weight = 0;
+		pixels.forEach((pixel, j) => {
+			if (pixel[i] === null) return;
+			total += pixel[i]! * weights[j];
+			weight += weights[j];
+		});
+		return weight === 0 ? null : total / weight;
 	});
 }
 

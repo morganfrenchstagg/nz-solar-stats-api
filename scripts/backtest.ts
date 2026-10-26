@@ -3,16 +3,22 @@
 //
 //   npm run backtest -- MHO0331 202608_Embedded_generation.csv 202609_Embedded_generation.csv
 //   npm run backtest -- all 202608_Embedded_generation.csv 202609_Embedded_generation.csv
+//   npm run backtest -- farms 202608_Embedded_generation.csv 202609_Embedded_generation.csv
 //
-// The first argument is a POC, a GXP (every POC starting with it), or "all" to
-// compare every GXP with solar exports. Options: --api <url> for capacities
-// (default http://localhost:8787, the dev server) and --out <file> for a CSV of
+// The first argument is a POC, a GXP (every POC starting with it), "all" to
+// compare every GXP with solar exports, or "farms" for the dispatched solar
+// farms in the files. Options: --api <url> for capacities (default
+// http://localhost:8787, the dev server), --weather satellite|forecast
+// (default satellite, as the API does) and --out <file> for a CSV of
 // half-hours (one GXP) or of GXP results ("all").
 //
 // Metered injection is what ICPs export after using their own solar, so it
 // sits below the model's gross generation. The shape and the day-to-day swings
-// are the fair test; the overall ratio is roughly the share exported.
+// are the fair test; the overall ratio is roughly the share exported. Farms
+// export everything they generate, so they test the model's level directly.
 import { readFileSync, writeFileSync } from "node:fs";
+import { type GxpLocation, weatherPoints, type WeatherPoints } from "../src/production/blend.ts";
+import gxpLocations from "../src/production/gxpLocations.json" with { type: "json" };
 import {
 	clearnessIndex,
 	correlation,
@@ -23,6 +29,7 @@ import {
 	SKIES,
 	skyOf,
 	stdDev,
+	type WeatherSource,
 } from "./shared.ts";
 
 const HALF_HOUR_MS = 30 * 60 * 1000;
@@ -31,6 +38,17 @@ const HALF_HOUR_MS = 30 * 60 * 1000;
 const MAX_SOLAR_NIGHT_SHARE = 0.05;
 // Below this, a GXP's exports are too small to say much ("all" only).
 const MIN_EXPORT_MWH = 5;
+// Solar farms dispatched by the System Operator, by their series in the
+// embedded generation files. Kōwhai Park (ISL0661, CTCT) is left out while
+// it's still commissioning.
+const FARMS = [
+	{ poc: "ASB0661", retailer: "GENE", unit: "Lauriston" },
+	{ poc: "EDG0331", retailer: "LODE", unit: "Rangitaiki" },
+	{ poc: "EDG0331", retailer: "AQNZ", unit: "Omeheu" },
+	{ poc: "KOE1101", retailer: "LODE", unit: "Kohirā" },
+	{ poc: "KOE1101", retailer: "AQNZ", unit: "Pukenui" },
+	{ poc: "MTO0331", retailer: "NPGL", unit: "Te Puna Mauri ō Omaru" },
+];
 
 type Days = Map<string, number[]>; // trading date → kWh per trading period
 
@@ -48,7 +66,7 @@ interface Result {
 	name: string;
 	halfHours: HalfHour[];
 	capacityMw: number;
-	kwPerIcp: number;
+	kwPerIcp: number | null;
 	observedMwh: number;
 	modelMwh: number;
 	share: number;
@@ -57,6 +75,9 @@ interface Result {
 	halfHourR: number;
 	shapeError: number;
 	peaks: { observed: string; model: string };
+	// Energy-weighted middle of the day, NZ clock time: unlike the peak, not
+	// thrown by flat tops when output hits an inverter limit.
+	centres: { observed: string; model: string };
 	profile: [string, number, number][]; // NZ clock time, observed and modelled share of energy
 	skies: Sky[];
 }
@@ -65,6 +86,7 @@ interface Sky {
 	name: string;
 	days: number;
 	clearness: [number, number]; // lowest and highest daily clearness index
+	observedMwh: number;
 	share: number;
 	// Misses once the model is scaled by the overall share, as a share of observed energy.
 	dailyError: number;
@@ -79,11 +101,15 @@ const option = (name: string, fallback: string) => {
 };
 const apiUrl = option("api", "http://localhost:8787");
 const outPath = option("out", "");
+const weatherSource = option("weather", "satellite") as WeatherSource;
 const [target, ...files] = args;
-if (!target || files.length === 0) {
-	console.error("Usage: npm run backtest -- <POC | GXP | all> <embedded generation CSV>... [--api url] [--out file]");
+if (!target || files.length === 0 || !["satellite", "forecast"].includes(weatherSource)) {
+	console.error(
+		"Usage: npm run backtest -- <POC | GXP | all | farms> <embedded generation CSV>... [--api url] [--weather satellite|forecast] [--out file]",
+	);
 	process.exit(1);
 }
+console.log(`Weather: ${weatherSource === "satellite" ? "satellite readings (as the API uses them)" : "forecast only"}`);
 
 // Injected kWh by POC and retailer.
 const injections = new Map<string, Map<string, Days>>();
@@ -118,6 +144,8 @@ const substations = (await (await fetch("https://api.electricitymap.frenchsta.gg
 
 if (target === "all") {
 	await backtestAll();
+} else if (target === "farms") {
+	await backtestFarms();
 } else {
 	const result = await backtest(target, true);
 	printResult(result);
@@ -172,7 +200,7 @@ async function backtestAll() {
 	console.log(`\n\nGXP  name                 MW   kW/ICP  exported  modelled  share  ±day  daily r  hh r  peak obs/mod`);
 	for (const r of results.sort((a, b) => a.share - b.share)) {
 		console.log(
-			`${r.target}  ${r.name.slice(0, 18).padEnd(18)} ${r.capacityMw.toFixed(1).padStart(6)}  ${r.kwPerIcp.toFixed(1).padStart(6)}  ${r.observedMwh.toFixed(0).padStart(8)}  ${r.modelMwh.toFixed(0).padStart(8)}  ${r.share.toFixed(2).padStart(5)}  ${r.dailyShareSpread.toFixed(2)}  ${r.dailyR.toFixed(2).padStart(7)}  ${r.halfHourR.toFixed(2)}  ${r.peaks.observed}/${r.peaks.model}`,
+			`${r.target}  ${r.name.slice(0, 18).padEnd(18)} ${r.capacityMw.toFixed(1).padStart(6)}  ${(r.kwPerIcp ?? 0).toFixed(1).padStart(6)}  ${r.observedMwh.toFixed(0).padStart(8)}  ${r.modelMwh.toFixed(0).padStart(8)}  ${r.share.toFixed(2).padStart(5)}  ${r.dailyShareSpread.toFixed(2)}  ${r.dailyR.toFixed(2).padStart(7)}  ${r.halfHourR.toFixed(2)}  ${r.peaks.observed}/${r.peaks.model}`,
 		);
 	}
 
@@ -183,7 +211,7 @@ async function backtestAll() {
 	console.log(`\n${results.length} GXPs: ${exported.toFixed(0)} MWh exported of ${modelled.toFixed(0)} MWh modelled, a share of ${(exported / modelled).toFixed(2)}`);
 	console.log(`  Share by GXP: median ${quantile(0.5).toFixed(2)}, middle half ${quantile(0.25).toFixed(2)}–${quantile(0.75).toFixed(2)}, range ${shares[0].toFixed(2)}–${shares[shares.length - 1].toFixed(2)}`);
 	console.log(`  Median correlation: daily r ${median(results.map((r) => r.dailyR)).toFixed(2)}, half-hour r ${median(results.map((r) => r.halfHourR)).toFixed(2)}`);
-	console.log(`  Share vs average system size: r = ${correlation(results.map((r) => r.kwPerIcp), results.map((r) => r.share)).toFixed(2)}`);
+	console.log(`  Share vs average system size: r = ${correlation(results.map((r) => r.kwPerIcp ?? 0), results.map((r) => r.share)).toFixed(2)}`);
 	console.log(`  Skipped ${skipped.length}: ${skipped.join(", ")}`);
 
 	if (outPath) {
@@ -192,7 +220,7 @@ async function backtestAll() {
 			[
 				"gxp,name,capacity_mw,kw_per_icp,exported_mwh,modelled_mwh,share,daily_share_spread,daily_r,half_hour_r,observed_peak,modelled_peak",
 				...results.map((r) =>
-					[r.target, `"${r.name}"`, r.capacityMw, r.kwPerIcp.toFixed(2), r.observedMwh.toFixed(2), r.modelMwh.toFixed(2), r.share.toFixed(4), r.dailyShareSpread.toFixed(4), r.dailyR.toFixed(4), r.halfHourR.toFixed(4), r.peaks.observed, r.peaks.model].join(","),
+					[r.target, `"${r.name}"`, r.capacityMw, (r.kwPerIcp ?? 0).toFixed(2), r.observedMwh.toFixed(2), r.modelMwh.toFixed(2), r.share.toFixed(4), r.dailyShareSpread.toFixed(4), r.dailyR.toFixed(4), r.halfHourR.toFixed(4), r.peaks.observed, r.peaks.model].join(","),
 				),
 			].join("\n") + "\n",
 		);
@@ -231,6 +259,38 @@ async function backtest(target: string, verbose: boolean): Promise<Result> {
 	}
 	if (solar.length === 0) throw new Error(`no solar exports found for ${target}`);
 
+	const site = substations.find((substation) => substation.siteId === gxp);
+	if (!site) throw new Error(`no substation ${gxp}`);
+	const capacities = await capacityHistory(gxp);
+	const capacityAt = (date: string) => {
+		const capacity = capacities.findLast((month) => month.monthEnd <= date);
+		if (!capacity) throw new Error(`no capacity as at ${date}`);
+		return capacity;
+	};
+	const lastDate = [...new Set(solar.flatMap((days) => [...days.keys()]))].sort().at(-1)!;
+	const latest = capacityAt(lastDate);
+	const locations: Record<string, GxpLocation> = gxpLocations.gxps;
+	return compare({
+		target,
+		name: site.description,
+		series: solar,
+		points: weatherPoints(site, locations[gxp], latest.distributedMw),
+		capacityAt: (date) => capacityAt(date).distributedMw,
+		kwPerIcp: (latest.distributedMw * 1000) / latest.icpCount,
+	});
+}
+
+// Compares metered series against the model at a site, over the dates they cover.
+async function compare(subject: {
+	target: string;
+	name: string;
+	series: Days[];
+	// Where to take the weather, as the API would.
+	points: WeatherPoints;
+	capacityAt: (date: string) => number;
+	kwPerIcp: number | null;
+}): Promise<Result> {
+	const solar = subject.series;
 	// Trading periods count half-hours of elapsed time from NZ midnight, so a
 	// daylight saving day has 46 or 50 of them.
 	const halfHours: HalfHour[] = [];
@@ -250,29 +310,74 @@ async function backtest(target: string, verbose: boolean): Promise<Result> {
 		}
 	}
 
-	const site = substations.find((substation) => substation.siteId === gxp);
-	if (!site) throw new Error(`no substation ${gxp}`);
-	const capacities = await capacityHistory(gxp);
-	const weather = await fetchWeather(site.lat, site.long, dates[0], dates[dates.length - 1]);
+	const weather = await fetchWeather(subject.points, dates[0], dates[dates.length - 1], { source: weatherSource });
 	for (const halfHour of halfHours) {
-		const capacity = capacities.findLast((month) => month.monthEnd <= halfHour.tradingDate);
-		if (!capacity) throw new Error(`no capacity as at ${halfHour.tradingDate}`);
-		halfHour.capacityMw = capacity.distributedMw;
-		halfHour.modelKwh = modelKwh(weather, halfHour.start, halfHour.start + HALF_HOUR_MS, capacity.distributedMw);
+		halfHour.capacityMw = subject.capacityAt(halfHour.tradingDate);
+		halfHour.modelKwh = modelKwh(weather, halfHour.start, halfHour.start + HALF_HOUR_MS, halfHour.capacityMw);
 	}
 	const clearness = new Map(dates.map((date) => [date, clearnessIndex(weather, date)]));
 
-	const latest = capacities.findLast((month) => month.monthEnd <= dates[dates.length - 1])!;
 	const measured = measure(halfHours);
 	return {
 		...measured,
-		target,
-		name: site.description,
+		target: subject.target,
+		name: subject.name,
 		halfHours,
-		capacityMw: latest.distributedMw,
-		kwPerIcp: (latest.distributedMw * 1000) / latest.icpCount,
+		capacityMw: subject.capacityAt(dates[dates.length - 1]),
+		kwPerIcp: subject.kwPerIcp,
 		skies: bySky(halfHours, clearness, measured.share),
 	};
+}
+
+// The dispatched solar farms, each modelled at its own location and dispatch
+// capacity, on its own satellite pixel.
+async function backtestFarms() {
+	const generators = (await (await fetch("https://api.electricitymap.frenchsta.gg/v1/generators")).json()) as {
+		location: { lat: number; long: number };
+		units: { name: string; capacity: number; fuelCode: string }[];
+	}[];
+	const results: Result[] = [];
+	for (const farm of FARMS) {
+		const generator = generators.find((g) => g.units.some((unit) => unit.name === farm.unit && unit.fuelCode === "SOL"));
+		const days = injections.get(farm.poc)?.get(farm.retailer);
+		if (!generator || !days) {
+			console.log(`Skipped ${farm.unit}: ${generator ? "no series in the files" : "not in the generators list"}`);
+			continue;
+		}
+		const capacityMw = generator.units.find((unit) => unit.name === farm.unit)!.capacity;
+		results.push(
+			await compare({
+				target: `${farm.poc} ${farm.retailer}`,
+				name: farm.unit,
+				series: [days],
+				points: { forecast: generator.location, pixels: [{ ...generator.location, weight: 1 }] },
+				capacityAt: () => capacityMw,
+				kwPerIcp: null,
+			}),
+		);
+		process.stdout.write(".");
+	}
+
+	console.log("\n\nfarm                    MW  metered  modelled  ratio  ±day  daily r  hh r  shape  centre met/mod");
+	for (const r of results) {
+		console.log(
+			`${r.name.padEnd(22)} ${r.capacityMw.toFixed(1).padStart(5)}  ${r.observedMwh.toFixed(0).padStart(7)}  ${r.modelMwh.toFixed(0).padStart(8)}  ${r.share.toFixed(2).padStart(5)}  ${r.dailyShareSpread.toFixed(2)}  ${r.dailyR.toFixed(2).padStart(7)}  ${r.halfHourR.toFixed(2)}  ${(r.shapeError * 100).toFixed(0).padStart(4)}%  ${r.centres.observed}/${r.centres.model}`,
+		);
+	}
+
+	// Each farm's misses are after scaling it by its own ratio, so pooling them
+	// shows the weather's errors rather than any farm's size or layout.
+	console.log("\n  All farms by sky   farm-days  ratio vs own  daily miss  half-hour miss");
+	for (const { name } of SKIES) {
+		const skies = results.flatMap((r) => r.skies.filter((sky) => sky.name === name).map((sky) => ({ sky, share: r.share })));
+		if (skies.length === 0) continue;
+		const observed = skies.reduce((sum, { sky }) => sum + sky.observedMwh, 0);
+		const weighted = (pick: (sky: Sky) => number) => skies.reduce((sum, { sky }) => sum + pick(sky) * sky.observedMwh, 0) / observed;
+		const relative = skies.reduce((sum, { sky, share }) => sum + (sky.share / share) * sky.observedMwh, 0) / observed;
+		console.log(
+			`    ${name.padEnd(14)} ${String(skies.reduce((sum, { sky }) => sum + sky.days, 0)).padStart(11)}  ${relative.toFixed(2).padStart(12)}  ${(weighted((sky) => sky.dailyError) * 100).toFixed(0).padStart(9)}%  ${(weighted((sky) => sky.halfHourError) * 100).toFixed(0).padStart(13)}%`,
+		);
+	}
 }
 
 function bySky(halfHours: HalfHour[], clearness: Map<string, number>, overallShare: number): Sky[] {
@@ -291,6 +396,7 @@ function bySky(halfHours: HalfHour[], clearness: Map<string, number>, overallSha
 			name,
 			days: dates.length,
 			clearness: [Math.min(...indices), Math.max(...indices)] as [number, number],
+			observedMwh: observed / 1000,
 			share: observed / sum(days.map((day) => day.model)),
 			dailyError: sum(days.map((day) => Math.abs(day.observed - day.model * overallShare))) / observed,
 			halfHourError: sum(daylight.map((h) => Math.abs(h.observedKwh - h.modelKwh * overallShare))) / observed,
@@ -321,6 +427,12 @@ function measure(halfHours: HalfHour[]) {
 	}
 	const clocks = [...byClock.entries()].sort(([a], [b]) => a.localeCompare(b));
 	const peak = (key: "observed" | "model") => clocks.reduce((best, slot) => (slot[1][key] > best[1][key] ? slot : best))[0];
+	const centre = (key: "observed" | "model") => {
+		// Weighted by energy, at the middle of each half-hour.
+		const minutes = clocks.reduce((sum, [clock, slot]) => sum + (Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3)) + 15) * slot[key], 0) /
+			clocks.reduce((sum, [, slot]) => sum + slot[key], 0);
+		return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(Math.round(minutes % 60)).padStart(2, "0")}`;
+	};
 
 	return {
 		observedMwh: observed / 1000,
@@ -332,6 +444,7 @@ function measure(halfHours: HalfHour[]) {
 		// How far off the shape is once the model is scaled to the observed total.
 		shapeError: sum(daylight.map((h) => Math.abs(h.observedKwh - h.modelKwh * share))) / observed,
 		peaks: { observed: peak("observed"), model: peak("model") },
+		centres: { observed: centre("observed"), model: centre("model") },
 		profile: clocks.map(([clock, slot]) => [clock, slot.observed / observed, slot.model / model] as [string, number, number]),
 	};
 }
@@ -340,13 +453,14 @@ function printResult(r: Result) {
 	const days = new Set(r.halfHours.map((h) => h.tradingDate));
 	const dates = [...days].sort();
 	console.log(`\n${r.target}: ${days.size} days, ${dates[0]} to ${dates[dates.length - 1]}`);
-	console.log(`  Capacity             ${[...new Set(r.halfHours.map((h) => h.capacityMw))].join(" → ")} MW (${r.kwPerIcp.toFixed(1)} kW per ICP)`);
+	console.log(`  Capacity             ${[...new Set(r.halfHours.map((h) => h.capacityMw))].join(" → ")} MW${r.kwPerIcp === null ? "" : ` (${r.kwPerIcp.toFixed(1)} kW per ICP)`}`);
 	console.log(`  Observed exports     ${r.observedMwh.toFixed(1)} MWh (${(r.observedMwh / days.size).toFixed(2)} MWh a day)`);
 	console.log(`  Modelled generation  ${r.modelMwh.toFixed(1)} MWh (${(r.modelMwh / days.size).toFixed(2)} MWh a day)`);
 	console.log(`  Observed / modelled  ${r.share.toFixed(2)} overall, ± ${r.dailyShareSpread.toFixed(2)} day to day`);
 	console.log(`  Correlation          daily energy r = ${r.dailyR.toFixed(2)}, daylight half-hours r = ${r.halfHourR.toFixed(2)}`);
 	console.log(`  Shape error          ${(r.shapeError * 100).toFixed(0)}% of observed energy, after scaling the model by ${r.share.toFixed(2)}`);
 	console.log(`  Average peak         observed at ${r.peaks.observed}, modelled at ${r.peaks.model} (half-hour starting, NZ time)`);
+	console.log(`  Middle of the day    observed ${r.centres.observed}, modelled ${r.centres.model} (energy-weighted, NZ time)`);
 
 	console.log(`\n  By sky (clearness index), misses after scaling the model by ${r.share.toFixed(2)}:`);
 	console.log("    sky             days  clearness   share  daily miss  half-hour miss  half-hour r");

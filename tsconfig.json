@@ -7,6 +7,7 @@
 		"types": ["@types/node", "./worker-configuration.d.ts"],
 		"noEmit": true,
 		"isolatedModules": true,
+		"resolveJsonModule": true,
 		"forceConsistentCasingInFileNames": true,
 		"skipLibCheck": true,
 		"strict": true

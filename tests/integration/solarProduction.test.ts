@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import gxpLocations from "../../src/production/gxpLocations.json";
 
 const ISLINGTON_LAT = -43.5;
 // 2pm on Monday 26 October in NZ.
@@ -15,9 +16,9 @@ function dayTimes(date: string, stepSeconds: number): number[] {
 	return Array.from({ length: 86400 / stepSeconds }, (_, i) => midnight + i * stepSeconds);
 }
 
-// Islington's pixels, its own and those around it.
+// Islington's points: its substation and where Christchurch's people are around it.
 const nearIslington = (lat: string, long: string) =>
-	Math.abs(Number(lat) - ISLINGTON_LAT) < 0.06 && Math.abs(Number(long) - 172.5) < 0.07;
+	Math.abs(Number(lat) - ISLINGTON_LAT) < 0.15 && Math.abs(Number(long) - 172.5) < 0.15;
 
 // The forecast gives Islington full sun at 25 °C all day, and everywhere else
 // none. Like Open-Meteo, it only has about three months back to two weeks
@@ -121,7 +122,7 @@ describe("GET /solar-production[/{date}]", () => {
 		expect(result).toMatchObject({
 			date: "2026-10-26",
 			capacityMonthEnd: "2026-09-30",
-			attribution: "Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari",
+			attribution: `Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari; population from ${gxpLocations.source}`,
 			// 58.787 MW × 1.2 DC:AC × 0.83 × 0.88 for cell heating
 			total: { distributedMw: 83.561, productionMw: 51.526 },
 		});
@@ -134,13 +135,13 @@ describe("GET /solar-production[/{date}]", () => {
 		expect(result.gxps[0]).toMatchObject({ irradianceWm2: 1000, temperatureC: 25 });
 	});
 
-	it("asks Open-Meteo for today's NZ forecast on a north-facing tilted panel", async () => {
+	it("asks Open-Meteo for today's NZ forecast at each GXP's population centre, on a north-facing tilted panel", async () => {
 		const fetch = mockOpenMeteo();
 		await getProduction();
 
 		const url = new URL(String(fetch.mock.calls[0][0]));
 		expect(Object.fromEntries(url.searchParams)).toMatchObject({
-			latitude: "-43.5000,-43.9000",
+			latitude: [gxpLocations.gxps.ISL.centre[0], gxpLocations.gxps.ASB.centre[0]].map((lat) => lat.toFixed(4)).join(","),
 			minutely_15: "global_tilted_irradiance_instant,temperature_2m",
 			tilt: "20",
 			azimuth: "180",
@@ -181,12 +182,14 @@ describe("GET /solar-production[/{date}]", () => {
 		expect(at("15:30")).toBe(51.526); // two hours on, the forecast's own
 	});
 
-	it("averages five satellite pixels for GXPs of 5 MW or more", async () => {
+	it("reads the satellite at each GXP's five most-populated pixels when it's 5 MW or more", async () => {
 		const fetch = mockOpenMeteo();
 		await getProduction();
 
 		const latitudes = new URL(String(callsTo(fetch, SATELLITE)[0][0])).searchParams.get("latitude")!.split(",");
-		expect(latitudes).toEqual(["-43.5000", "-43.4500", "-43.5500", "-43.5000", "-43.5000", "-43.9000", "-43.8500", "-43.9500", "-43.9000", "-43.9000"]);
+		expect(latitudes).toEqual(
+			[...gxpLocations.gxps.ISL.pixels, ...gxpLocations.gxps.ASB.pixels].map(([lat]) => lat.toFixed(4)),
+		);
 	});
 
 	it("falls back to the forecast when the satellite fails", async () => {

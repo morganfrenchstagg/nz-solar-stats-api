@@ -1,4 +1,4 @@
-import { averagePixels, blendIrradiance, pixelsAround } from "./blend";
+import { averagePixels, blendIrradiance, type WeatherPoints } from "./blend";
 import { PANEL_AZIMUTH_DEGREES, PANEL_TILT_DEGREES } from "./estimate";
 
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
@@ -21,11 +21,9 @@ export class WeatherUnavailableError extends Error {}
 // a past day's weather is kept for good.
 export class WeatherFetchError extends Error {}
 
-export interface WeatherLocation {
+// A GXP and the points its weather is taken at (see gxpWeatherPoints).
+export interface WeatherLocation extends WeatherPoints {
 	id: string;
-	lat: number;
-	long: number;
-	capacityMw: number;
 }
 
 // A day's 15-minute weather at each location.
@@ -166,7 +164,7 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 	for (const batch of batches(locations)) {
 		const res = await fetch(
 			`${OPEN_METEO_FORECAST_URL}?${new URLSearchParams({
-				...coordinates(batch),
+				...coordinates(batch.map((location) => location.forecast)),
 				minutely_15: "global_tilted_irradiance_instant,temperature_2m",
 				...sharedParams(date),
 			})}`,
@@ -208,11 +206,10 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 }
 
 // Himawari-9 irradiance on the model's panel, every 10 minutes on a ~5 km
-// grid. Readings not taken yet come back as null.
+// grid, averaged over each location's pixels by their weights. Readings not
+// taken yet come back as null.
 async function fetchSatellite(locations: WeatherLocation[], date: string, now: Date): Promise<SatelliteDay> {
-	const pixels = locations.flatMap((location) =>
-		pixelsAround(location.lat, location.long, location.capacityMw).map((pixel) => ({ ...pixel, id: location.id })),
-	);
+	const pixels = locations.flatMap((location) => location.pixels.map((pixel) => ({ ...pixel, id: location.id })));
 	const readings: OpenMeteoSatellite[] = [];
 	for (const batch of batches(pixels)) {
 		const res = await fetch(
@@ -237,12 +234,16 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		fetchedAt: now.toISOString(),
 		times: readings[0].hourly.time.map((seconds) => seconds * 1000),
 		locations: Object.fromEntries(
-			locations.map(({ id }) => [
-				id,
-				averagePixels(
-					readings.filter((_, i) => pixels[i].id === id).map(({ hourly }) => hourly.global_tilted_irradiance_instant),
-				),
-			]),
+			locations.map(({ id }) => {
+				const own = pixels.map((pixel, i) => [pixel, readings[i]] as const).filter(([pixel]) => pixel.id === id);
+				return [
+					id,
+					averagePixels(
+						own.map(([, { hourly }]) => hourly.global_tilted_irradiance_instant),
+						own.map(([pixel]) => pixel.weight),
+					),
+				];
+			}),
 		),
 	};
 }
