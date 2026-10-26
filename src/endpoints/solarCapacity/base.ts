@@ -18,6 +18,11 @@ export const capacity = z.object({
 	distributedMw: z
 		.number()
 		.describe("installedMw minus dispatchedMw: solar that isn't counted in public generation data, in MW AC"),
+	stepMw: z
+		.number()
+		.describe(
+			"Distributed capacity that arrived this month in farm-sized steps, such as a solar farm too small to be dispatched: part of distributedMw, but a one-off rather than steady growth",
+		),
 });
 
 export type Capacity = z.infer<typeof capacity>;
@@ -27,4 +32,5 @@ export const capacityColumns = `
 	sum(icp_count) AS icpCount,
 	round(sum(installed_mw), 3) AS installedMw,
 	round(sum(dispatched_mw), 3) AS dispatchedMw,
-	round(sum(distributed_mw), 3) AS distributedMw`;
+	round(sum(distributed_mw), 3) AS distributedMw,
+	round(sum(step_mw), 3) AS stepMw`;

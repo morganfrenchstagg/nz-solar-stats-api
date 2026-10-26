@@ -73,5 +73,6 @@ function sumCapacity(rows: Capacity[]): Capacity {
 		installedMw: sum("installedMw"),
 		dispatchedMw: sum("dispatchedMw"),
 		distributedMw: sum("distributedMw"),
+		stepMw: sum("stepMw"),
 	};
 }

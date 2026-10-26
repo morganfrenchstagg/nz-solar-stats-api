@@ -1,6 +1,7 @@
 import { ApiException, contentJson, NotFoundException, OpenAPIRoute } from "chanfana";
 import { z } from "zod";
-import { type GxpCapacity, estimateProduction, round } from "../production/estimate";
+import { capacityAt, type CapacityMonth } from "../production/capacity";
+import { estimateProduction, round } from "../production/estimate";
 import { gxpWeatherPoints, POPULATION_SOURCE } from "../production/locations";
 import {
 	getWeather,
@@ -20,7 +21,9 @@ class BadGatewayException extends ApiException {
 }
 
 const production = z.object({
-	distributedMw: z.number().describe("Distributed solar capacity at capacityMonthEnd, in MW AC"),
+	distributedMw: z
+		.number()
+		.describe("Distributed solar capacity estimated for the date, in MW AC: the capacityMonthEnd snapshot plus recent growth since"),
 	productionMw: z.number().nullable().describe("Estimated output now, in MW AC. Null for other days."),
 	profileMw: z.array(z.number()).describe("Estimated output at each of profileTimes, in MW AC"),
 });
@@ -33,6 +36,11 @@ const gxpProduction = production.extend({
 		.nullable()
 		.describe("Irradiance now on a north-facing panel tilted 20°. Null for other days."),
 	temperatureC: z.number().nullable().describe("Air temperature now. Null for other days."),
+	growthMwPerMonth: z
+		.number()
+		.describe(
+			"Recent growth in distributed capacity, MW a month: a weighted average of month-on-month changes (each counting half as much as one three months newer), leaving out farm-sized one-offs",
+		),
 });
 
 const description =
@@ -46,7 +54,7 @@ const responses = {
 			result: z.object({
 				time: z.string().describe("When the estimate was made"),
 				date: z.string().describe("The NZ date estimated"),
-				capacityMonthEnd: z.string().describe("The month end the capacities are from"),
+				capacityMonthEnd: z.string().describe("The latest month-end snapshot the capacities are grown from"),
 				weatherFetchedAt: z.string(),
 				observedUntil: z
 					.string()
@@ -105,18 +113,32 @@ async function estimateDay(db: D1Database, requested: string) {
 		requested === "today" ? today : requested === "yesterday" ? previousDate(today) : requested;
 	const isToday = date === today;
 
-	const { results: gxps } = await db
+	// Each GXP's recent month-end snapshots: its capacity on the date is the
+	// latest plus growth since at its recent rate (see production/capacity.ts).
+	const { results: months } = await db
 		.prepare(
 			`SELECT c.gxp, g.name, g.lat, g.long, c.month_end AS monthEnd,
-				round(sum(c.distributed_mw), 3) AS distributedMw
+				round(sum(c.distributed_mw), 3) AS distributedMw, round(sum(c.step_mw), 3) AS stepMw
 			FROM solar_capacity c JOIN gxps g ON g.site_id = c.gxp
-			WHERE c.month_end = (SELECT max(month_end) FROM solar_capacity WHERE month_end <= ?)
-			GROUP BY c.gxp
-			HAVING distributedMw > 0
-			ORDER BY distributedMw DESC`,
+			WHERE c.month_end <= ?1 AND c.month_end > date(?1, '-14 months')
+			GROUP BY c.gxp, c.month_end
+			ORDER BY c.gxp, c.month_end`,
 		)
 		.bind(date)
-		.all<GxpCapacity & { lat: number; long: number; monthEnd: string }>();
+		.all<CapacityMonth & { gxp: string; name: string; lat: number; long: number }>();
+	const capacityMonthEnd = months.reduce((latest, month) => (month.monthEnd > latest ? month.monthEnd : latest), "");
+	const histories = new Map<string, typeof months>();
+	for (const month of months) histories.set(month.gxp, [...(histories.get(month.gxp) ?? []), month]);
+	const gxps = [...histories.values()]
+		// A GXP missing from the latest snapshot has left EMI's data.
+		.filter((history) => history[history.length - 1].monthEnd === capacityMonthEnd)
+		.map((history) => {
+			const { gxp, name, lat, long } = history[0];
+			const estimate = capacityAt(history, date)!;
+			return { gxp, name, lat, long, distributedMw: round(estimate.capacityMw), growthMwPerMonth: round(estimate.growthMwPerMonth) };
+		})
+		.filter((gxp) => gxp.distributedMw > 0)
+		.sort((a, b) => b.distributedMw - a.distributedMw);
 	if (gxps.length === 0) {
 		throw new NotFoundException(`No solar capacity as at ${date}`);
 	}
@@ -146,7 +168,7 @@ async function estimateDay(db: D1Database, requested: string) {
 		result: {
 			time: now.toISOString(),
 			date,
-			capacityMonthEnd: gxps[0].monthEnd,
+			capacityMonthEnd,
 			weatherFetchedAt: weather.fetchedAt,
 			observedUntil: weather.observedUntil === null ? null : new Date(weather.observedUntil).toISOString(),
 			attribution: `Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari; population from ${POPULATION_SOURCE}`,
@@ -158,7 +180,7 @@ async function estimateDay(db: D1Database, requested: string) {
 					sum(estimates.map((estimate) => estimate.profileMw[index])),
 				),
 			},
-			gxps: estimates,
+			gxps: estimates.map((estimate, i) => ({ ...estimate, growthMwPerMonth: gxps[i].growthMwPerMonth })),
 		},
 	};
 }

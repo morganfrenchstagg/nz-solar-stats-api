@@ -9,8 +9,10 @@
 // compare every GXP with solar exports, or "farms" for the dispatched solar
 // farms in the files. Options: --api <url> for capacities (default
 // http://localhost:8787, the dev server), --weather satellite|forecast
-// (default satellite, as the API does) and --out <file> for a CSV of
-// half-hours (one GXP) or of GXP results ("all").
+// (default satellite, as the API does), --capacity growth|snapshot (default
+// growth: the latest month-end snapshot plus recent growth, as the API does;
+// snapshot leaves out the growth) and --out <file> for a CSV of half-hours
+// (one GXP) or of GXP results ("all").
 //
 // Metered injection is what ICPs export after using their own solar, so it
 // sits below the model's gross generation. The shape and the day-to-day swings
@@ -18,6 +20,7 @@
 // export everything they generate, so they test the model's level directly.
 import { readFileSync, writeFileSync } from "node:fs";
 import { type GxpLocation, weatherPoints, type WeatherPoints } from "../src/production/blend.ts";
+import { capacityAt, type CapacityMonth } from "../src/production/capacity.ts";
 import gxpLocations from "../src/production/gxpLocations.json" with { type: "json" };
 import {
 	clearnessIndex,
@@ -102,14 +105,23 @@ const option = (name: string, fallback: string) => {
 const apiUrl = option("api", "http://localhost:8787");
 const outPath = option("out", "");
 const weatherSource = option("weather", "satellite") as WeatherSource;
+const capacityMethod = option("capacity", "growth");
 const [target, ...files] = args;
-if (!target || files.length === 0 || !["satellite", "forecast"].includes(weatherSource)) {
+if (
+	!target ||
+	files.length === 0 ||
+	!["satellite", "forecast"].includes(weatherSource) ||
+	!["growth", "snapshot"].includes(capacityMethod)
+) {
 	console.error(
-		"Usage: npm run backtest -- <POC | GXP | all | farms> <embedded generation CSV>... [--api url] [--weather satellite|forecast] [--out file]",
+		"Usage: npm run backtest -- <POC | GXP | all | farms> <embedded generation CSV>... [--api url] [--weather satellite|forecast] [--capacity growth|snapshot] [--out file]",
 	);
 	process.exit(1);
 }
 console.log(`Weather: ${weatherSource === "satellite" ? "satellite readings (as the API uses them)" : "forecast only"}`);
+console.log(
+	`Capacity: ${capacityMethod === "growth" ? "latest month-end snapshot plus recent growth (as the API does)" : "latest month-end snapshot"}`,
+);
 
 // Injected kWh by POC and retailer.
 const injections = new Map<string, Map<string, Days>>();
@@ -262,20 +274,24 @@ async function backtest(target: string, verbose: boolean): Promise<Result> {
 	const site = substations.find((substation) => substation.siteId === gxp);
 	if (!site) throw new Error(`no substation ${gxp}`);
 	const capacities = await capacityHistory(gxp);
-	const capacityAt = (date: string) => {
-		const capacity = capacities.findLast((month) => month.monthEnd <= date);
-		if (!capacity) throw new Error(`no capacity as at ${date}`);
-		return capacity;
+	// What the API would have estimated on each date, from the snapshots before it.
+	const capacityOn = (date: string) => {
+		const estimate = capacityAt(capacities, date);
+		if (!estimate) throw new Error(`no capacity as at ${date}`);
+		if (capacityMethod === "snapshot") {
+			return capacities.find((month) => month.monthEnd === estimate.monthEnd)!.distributedMw;
+		}
+		return estimate.capacityMw;
 	};
 	const lastDate = [...new Set(solar.flatMap((days) => [...days.keys()]))].sort().at(-1)!;
-	const latest = capacityAt(lastDate);
+	const latest = capacities.findLast((month) => month.monthEnd <= lastDate)!;
 	const locations: Record<string, GxpLocation> = gxpLocations.gxps;
 	return compare({
 		target,
 		name: site.description,
 		series: solar,
 		points: weatherPoints(site, locations[gxp], latest.distributedMw),
-		capacityAt: (date) => capacityAt(date).distributedMw,
+		capacityAt: capacityOn,
 		kwPerIcp: (latest.distributedMw * 1000) / latest.icpCount,
 	});
 }
@@ -453,7 +469,8 @@ function printResult(r: Result) {
 	const days = new Set(r.halfHours.map((h) => h.tradingDate));
 	const dates = [...days].sort();
 	console.log(`\n${r.target}: ${days.size} days, ${dates[0]} to ${dates[dates.length - 1]}`);
-	console.log(`  Capacity             ${[...new Set(r.halfHours.map((h) => h.capacityMw))].join(" → ")} MW${r.kwPerIcp === null ? "" : ` (${r.kwPerIcp.toFixed(1)} kW per ICP)`}`);
+	const capacities = r.halfHours.map((h) => h.capacityMw);
+	console.log(`  Capacity             ${capacities[0].toFixed(3)} → ${capacities[capacities.length - 1].toFixed(3)} MW${r.kwPerIcp === null ? "" : ` (${r.kwPerIcp.toFixed(1)} kW per ICP)`}`);
 	console.log(`  Observed exports     ${r.observedMwh.toFixed(1)} MWh (${(r.observedMwh / days.size).toFixed(2)} MWh a day)`);
 	console.log(`  Modelled generation  ${r.modelMwh.toFixed(1)} MWh (${(r.modelMwh / days.size).toFixed(2)} MWh a day)`);
 	console.log(`  Observed / modelled  ${r.share.toFixed(2)} overall, ± ${r.dailyShareSpread.toFixed(2)} day to day`);
@@ -477,9 +494,9 @@ function printResult(r: Result) {
 	}
 }
 
-async function capacityHistory(gxp: string): Promise<{ monthEnd: string; distributedMw: number; icpCount: number }[]> {
+async function capacityHistory(gxp: string): Promise<(CapacityMonth & { icpCount: number })[]> {
 	const res = await fetch(`${apiUrl}/solar-capacity/${gxp}`);
 	if (!res.ok) throw new Error(`no capacity from ${apiUrl} (${res.status})`);
-	const body = (await res.json()) as { result: { months: { monthEnd: string; distributedMw: number; icpCount: number }[] } };
+	const body = (await res.json()) as { result: { months: (CapacityMonth & { icpCount: number })[] } };
 	return body.result.months;
 }

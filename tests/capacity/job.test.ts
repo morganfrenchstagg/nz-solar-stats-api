@@ -50,12 +50,12 @@ const generators = [
 	},
 ];
 
-function mockSources(csv = emiCsv) {
+function mockSources(csv = emiCsv, generatorList = generators) {
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		const url = String(input instanceof Request ? input.url : input);
 		if (url.startsWith("https://www.emi.ea.govt.nz/")) return new Response(csv);
 		if (url.endsWith("/v1/substations")) return Response.json(substations);
-		if (url.endsWith("/v1/generators")) return Response.json(generators);
+		if (url.endsWith("/v1/generators")) return Response.json(generatorList);
 		return new Response("Not found", { status: 404 });
 	});
 }
@@ -96,6 +96,30 @@ describe("runCapacityJob", () => {
 		expect(gxps.results).toEqual([
 			{ site_id: "ISL", name: "Islington" },
 			{ site_id: "WAI", name: "Waiotahe" },
+		]);
+	});
+
+	it("keeps farm-sized steps that aren't dispatched apart from steady growth", async () => {
+		// With a solar farm elsewhere in the generators list instead of Kōwhai
+		// Park, its step is distributed solar.
+		mockSources(emiCsv, [
+			...generators.filter((generator) => generator.site !== "KPS"),
+			{
+				site: "HTR",
+				name: "Te Herenga o Te Rā",
+				units: [{ name: "Te Herenga o Te Rā", unitCode: "HTR0", node: "WAI0331 HTR0", capacity: 34, fuel: "Solar", fuelCode: "SOL", commissioned: "2024-12-17T06:20:00.000Z" }],
+			},
+		]);
+		await runCapacityJob(env, now);
+
+		const { results } = await env.DB.prepare(
+			"SELECT month_end, dispatched_mw, step_mw FROM solar_capacity WHERE nsp = 'ISL0661ORONGN' ORDER BY month_end",
+		).all();
+		expect(results).toEqual([
+			{ month_end: "2026-06-30", dispatched_mw: 0, step_mw: 0 },
+			{ month_end: "2026-07-31", dispatched_mw: 0, step_mw: 160.117 },
+			{ month_end: "2026-08-31", dispatched_mw: 0, step_mw: 0 },
+			{ month_end: "2026-09-30", dispatched_mw: 0, step_mw: 0 },
 		]);
 	});
 

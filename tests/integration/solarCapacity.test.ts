@@ -37,10 +37,10 @@ describe("Solar capacity API", () => {
 			expect(response.status).toBe(200);
 			expect(body.result).toEqual({
 				monthEnd: "2026-07-31",
-				total: { icpCount: 8398, installedMw: 288.733, dispatchedMw: 214.771, distributedMw: 73.962 },
+				total: { icpCount: 8398, installedMw: 288.733, dispatchedMw: 214.771, distributedMw: 73.962, stepMw: 0 },
 				gxps: [
-					{ gxp: "ISL", name: "Islington", icpCount: 7474, installedMw: 216.445, dispatchedMw: 160.12, distributedMw: 56.325 },
-					{ gxp: "ASB", name: "Ashburton", icpCount: 924, installedMw: 72.288, dispatchedMw: 54.651, distributedMw: 17.637 },
+					{ gxp: "ISL", name: "Islington", icpCount: 7474, installedMw: 216.445, dispatchedMw: 160.12, distributedMw: 56.325, stepMw: 0 },
+					{ gxp: "ASB", name: "Ashburton", icpCount: 924, installedMw: 72.288, dispatchedMw: 54.651, distributedMw: 17.637, stepMw: 0 },
 				],
 			});
 		});
@@ -52,7 +52,7 @@ describe("Solar capacity API", () => {
 			expect(response.status).toBe(200);
 			expect(body.result.monthEnd).toBe("2026-06-30");
 			expect(body.result.gxps).toEqual([
-				{ gxp: "ISL", name: "Islington", icpCount: 7310, installedMw: 55.031, dispatchedMw: 0, distributedMw: 55.031 },
+				{ gxp: "ISL", name: "Islington", icpCount: 7310, installedMw: 55.031, dispatchedMw: 0, distributedMw: 55.031, stepMw: 0 },
 			]);
 		});
 
@@ -77,8 +77,8 @@ describe("Solar capacity API", () => {
 				gxp: "ISL",
 				name: "Islington",
 				months: [
-					{ monthEnd: "2026-06-30", icpCount: 7310, installedMw: 55.031, dispatchedMw: 0, distributedMw: 55.031 },
-					{ monthEnd: "2026-07-31", icpCount: 7474, installedMw: 216.445, dispatchedMw: 160.12, distributedMw: 56.325 },
+					{ monthEnd: "2026-06-30", icpCount: 7310, installedMw: 55.031, dispatchedMw: 0, distributedMw: 55.031, stepMw: 0 },
+					{ monthEnd: "2026-07-31", icpCount: 7474, installedMw: 216.445, dispatchedMw: 160.12, distributedMw: 56.325, stepMw: 0 },
 				],
 				dispatchedSteps: [
 					{ node: "ISL0661 KPS0", name: "Kōwhai Park", nsp: "ISL0661ORONGN", monthEnd: "2026-07-31", mw: 160.12 },

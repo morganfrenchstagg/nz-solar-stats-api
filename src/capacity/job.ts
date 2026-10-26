@@ -47,7 +47,13 @@ export async function runCapacityJob(
 		console.warn(`EMI NSPs with no matching GXP: ${unknownNsps.join(", ")}`);
 	}
 
-	const farmSteps = attributeStepsToFarms(findCapacitySteps(emiRows), farms);
+	const steps = findCapacitySteps(emiRows);
+	const farmSteps = attributeStepsToFarms(steps, farms);
+	// Farm-sized steps that aren't dispatched farms stay in distributed_mw,
+	// but are kept apart so they aren't mistaken for steady growth.
+	const otherSteps = steps.filter(
+		(step) => !farmSteps.some((farm) => farm.nsp === step.nsp && farm.monthEnd === step.monthEnd),
+	);
 	const farmsNotInEmi = farms
 		.filter((farm) => !farmSteps.some((step) => step.node === farm.node))
 		.map((farm) => farm.name);
@@ -60,6 +66,7 @@ export async function runCapacityJob(
 		row.icpCount,
 		row.capacityMw,
 		dispatchedMw(farmSteps, row),
+		otherSteps.find((step) => step.nsp === row.nsp && step.monthEnd === row.monthEnd)?.mw ?? 0,
 	]);
 	const stepRows = farmSteps.map((s) => [s.node, s.name, s.nsp, s.monthEnd, s.mw]);
 
@@ -85,7 +92,7 @@ export async function runCapacityJob(
 			...insertRows(
 				db,
 				"solar_capacity",
-				["nsp", "gxp", "month_end", "icp_count", "installed_mw", "dispatched_mw"],
+				["nsp", "gxp", "month_end", "icp_count", "installed_mw", "dispatched_mw", "step_mw"],
 				capacityRows,
 			),
 			db.prepare("DELETE FROM dispatched_solar_steps"),

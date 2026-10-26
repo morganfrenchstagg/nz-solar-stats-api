@@ -99,11 +99,14 @@ describe("GET /solar-production[/{date}]", () => {
 				('WAI', 'Waiotahe', 'ACSTN', 'north', -38.0, 177.0)`,
 			),
 			// WAI's solar is all a dispatched farm, so it has nothing to estimate.
+			// Capacity is flat from August to September, so it isn't grown.
 			env.DB.prepare(
 				`INSERT INTO solar_capacity (nsp, gxp, month_end, icp_count, installed_mw, dispatched_mw) VALUES
-				('ISL0661ORONGN', 'ISL', '2026-08-31', 6838, 208.725, 160.12),
+				('ISL0661ORONGN', 'ISL', '2026-08-31', 6838, 209.694, 160.12),
 				('ISL0661ORONGN', 'ISL', '2026-09-30', 6958, 209.694, 160.12),
+				('ISL0331ORONGN', 'ISL', '2026-08-31', 800, 9.213, 0),
 				('ISL0331ORONGN', 'ISL', '2026-09-30', 800, 9.213, 0),
+				('ASB0661EASHGN', 'ASB', '2026-08-31', 966, 73.055, 48.281),
 				('ASB0661EASHGN', 'ASB', '2026-09-30', 966, 73.055, 48.281),
 				('WAI0331HEDLGN', 'WAI', '2026-09-30', 1, 5, 5)`,
 			),
@@ -249,12 +252,30 @@ describe("GET /solar-production[/{date}]", () => {
 		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 0]);
 	});
 
-	it("uses the capacity as at the last month end before the date", async () => {
+	it("builds on the last month-end snapshot before the date", async () => {
 		mockOpenMeteo();
 		const { result } = await getProduction("/2026-09-15");
 
 		expect(result.capacityMonthEnd).toBe("2026-08-31");
-		expect(result.gxps.map((gxp: any) => [gxp.gxp, gxp.distributedMw])).toEqual([["ISL", 48.605]]);
+		expect(result.gxps.map((gxp: any) => [gxp.gxp, gxp.distributedMw])).toEqual([
+			["ISL", 58.787],
+			["ASB", 24.774],
+		]);
+	});
+
+	it("grows each GXP's capacity since its last snapshot at its recent rate", async () => {
+		// Islington grew 2 MW from August to September.
+		await env.DB.prepare(
+			"UPDATE solar_capacity SET installed_mw = 207.694 WHERE nsp = 'ISL0661ORONGN' AND month_end = '2026-08-31'",
+		).run();
+		mockOpenMeteo();
+		const { result } = await getProduction();
+		const isl = result.gxps.find((gxp: any) => gxp.gxp === "ISL");
+
+		expect(isl.growthMwPerMonth).toBe(2);
+		// 26 days after the 30 September snapshot.
+		expect(isl.distributedMw).toBe(Math.round((58.787 + 2 * (26 / (365.25 / 12))) * 1000) / 1000);
+		expect(result.gxps.find((gxp: any) => gxp.gxp === "ASB")).toMatchObject({ distributedMw: 24.774, growthMwPerMonth: 0 });
 	});
 
 	it("returns 404 with Open-Meteo's range for a date it has no weather for", async () => {
