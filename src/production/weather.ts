@@ -2,6 +2,11 @@ import { averagePixels, blendIrradiance, resample, stepsThrough, type WeatherPoi
 
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archive";
+const OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive";
+// Days too long ago for the forecast take their temperature (and sunlight
+// where the satellite has none) from ERA5-Land's 0.1° grid, filled in from
+// ERA5's 0.25° grid, hourly. It's about five days behind.
+export const ARCHIVE_MODEL = "era5_seamless";
 // Every location (and satellite pixel) counts against Open-Meteo's 10,000
 // free calls a day. The forecast for all GXPs is refreshed at most every three
 // hours (125 × 8 calls), and the satellite's ~310 pixels at most every half
@@ -20,7 +25,7 @@ const SATELLITE_DELAY_MS = 60 * 60 * 1000;
 // Keeps request URLs to a sensible length.
 const LOCATIONS_PER_REQUEST = 100;
 // Bumped when what's cached changes shape, so older copies are fetched again.
-const CACHE_FORMAT = 2;
+export const CACHE_FORMAT = 2;
 // Sunlight on flat ground, straight from the sun and from the rest of the sky.
 // Three variables and the temperature still count as one Open-Meteo call.
 const COMPONENTS = ["ghiWm2", "dniWm2", "dhiWm2"] as const;
@@ -59,17 +64,20 @@ export interface DayWeather {
 	locations: Record<string, LocationWeather>;
 	// Irradiance up to here is from the satellite, after it the forecast.
 	observedUntil: number | null;
+	// The Open-Meteo model the forecast part is from, if not the forecast API's.
+	model?: string;
 }
 
 // Where each location's weather was taken (see forecastPoint and
 // satellitePixels), so a cached day is refetched once a GXP's points move.
 type TakenAt = Record<string, string>;
 
-// Open-Meteo's 15-minute forecast, as cached.
-type Forecast = Omit<DayWeather, "observedUntil"> & { format: number; points: TakenAt };
+// Open-Meteo's 15-minute forecast, as cached, or for days long past ERA5's
+// hourly reanalysis (`model`).
+export type Forecast = Omit<DayWeather, "observedUntil"> & { format: number; points: TakenAt };
 
 // Each location's satellite irradiance, averaged over its pixels, every 10 minutes.
-interface SatelliteDay {
+export interface SatelliteDay {
 	format: number;
 	date: string;
 	fetchedAt: string;
@@ -88,8 +96,14 @@ interface OpenMeteoSatellite {
 	hourly: OpenMeteoSeries;
 }
 
+interface OpenMeteoArchive {
+	hourly: OpenMeteoSeries;
+}
+
+const NZ_DATE = new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" });
+
 export function nzDate(instant: Date): string {
-	return new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" }).format(instant);
+	return NZ_DATE.format(instant);
 }
 
 function nzHour(instant: Date): number {
@@ -114,10 +128,19 @@ export async function getWeather(
 	now: Date,
 ): Promise<DayWeather> {
 	const forecast = await getForecast(db, locations, date, now);
+	const satellite = await getSatellite(db, locations, date, now, forecast);
+	return blendWeather(forecast, satellite, locations);
+}
+
+// A day's weather at each location every 10 minutes, from its forecast and
+// satellite readings however they were got.
+export function blendWeather(
+	forecast: Forecast,
+	satellite: SatelliteDay | null,
+	locations: WeatherLocation[],
+): DayWeather {
 	const times = stepsThrough(forecast.times);
 	const onSteps = (values: number[]) => resample(forecast.times, values, times);
-	const day = { date, fetchedAt: forecast.fetchedAt, times };
-	const satellite = await getSatellite(db, locations, date, now, forecast);
 
 	let observedUntil: number | null = null;
 	const blended = Object.fromEntries(
@@ -131,16 +154,65 @@ export async function getWeather(
 				dniWm2: onSteps(cached.dniWm2),
 				dhiWm2: onSteps(cached.dhiWm2),
 			};
-			if (!satellite) return [id, location];
+			const readings = satellite?.locations[id];
+			if (!readings) return [id, location];
 			for (const component of COMPONENTS) {
-				const blend = blendIrradiance(satellite.times, satellite.locations[id][component], times, location[component]);
+				const blend = blendIrradiance(satellite.times, readings[component], times, location[component]);
 				location[component] = blend.irradianceWm2;
 				if (blend.observedUntil !== null) observedUntil = Math.max(observedUntil ?? 0, blend.observedUntil);
 			}
 			return [id, location];
 		}),
 	);
-	return { ...day, locations: blended, observedUntil };
+	return {
+		date: forecast.date,
+		fetchedAt: forecast.fetchedAt,
+		times,
+		locations: blended,
+		observedUntil,
+		...(forecast.model && { model: forecast.model }),
+	};
+}
+
+// A day's weather as the production job last cached it in D1, if it's in the
+// current format.
+export async function cachedWeather(
+	db: D1Database,
+	date: string,
+): Promise<{ forecast: Forecast; satellite: SatelliteDay | null } | null> {
+	const [forecast, satellite] = await Promise.all([
+		db.prepare("SELECT forecast FROM weather_forecasts WHERE nz_date = ?").bind(date).first<string>("forecast"),
+		db.prepare("SELECT data FROM satellite_irradiance WHERE nz_date = ?").bind(date).first<string>("data"),
+	]);
+	const cached = current<Forecast>(forecast);
+	return cached ? { forecast: cached, satellite: current<SatelliteDay>(satellite) } : null;
+}
+
+// Whether a past day's weather can't change any more: the forecast was
+// fetched after the day was over, and the satellite after its last sunlight
+// had arrived.
+export function weatherIsFinal(forecast: Forecast, satellite: SatelliteDay | null): boolean {
+	const sunlit = sunlitTimes(forecast);
+	if (nzDate(new Date(forecast.fetchedAt)) <= forecast.date) return false;
+	if (sunlit.length === 0) return true;
+	return satellite !== null && Date.parse(satellite.fetchedAt) >= sunlit[sunlit.length - 1] + SATELLITE_DELAY_MS;
+}
+
+// Whether a day's weather was taken where each location's is taken now (see
+// gxpWeatherPoints), and has all of them.
+export function weatherTakenAtPoints(
+	forecast: Forecast,
+	satellite: SatelliteDay | null,
+	locations: WeatherLocation[],
+): boolean {
+	return (
+		takenAt(forecast.points, locations, forecastPoint) &&
+		(satellite === null || takenAt(satellite.pixels, locations, satellitePixels))
+	);
+}
+
+function sunlitTimes(forecast: Forecast): number[] {
+	return forecast.times.filter((_, i) => Object.values(forecast.locations).some((location) => location.ghiWm2[i] > 0));
 }
 
 async function getForecast(
@@ -189,9 +261,7 @@ async function getSatellite(
 	now: Date,
 	forecast: Forecast,
 ): Promise<SatelliteDay | null> {
-	const sunlit = forecast.times.filter((_, i) =>
-		Object.values(forecast.locations).some((location) => location.ghiWm2[i] > 0),
-	);
+	const sunlit = sunlitTimes(forecast);
 	if (sunlit.length === 0 || now.getTime() < sunlit[0]) return null;
 
 	const cached = await db
@@ -275,10 +345,116 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 	};
 }
 
+// Weather for days long past, to backfill estimates: ERA5 for the forecast's
+// part, and the satellite archive. Each day has its own locations (GXPs come
+// and go, and grow into more pixels), but they're fetched together, so a
+// fortnight costs Open-Meteo what a day would (it counts a location's two
+// weeks as one call). Days ERA5 doesn't have yet, or has gaps in, are left
+// out; a day the satellite has no readings for gets ERA5's sunlight.
+export async function fetchArchiveWeather(
+	days: { date: string; locations: WeatherLocation[] }[],
+	now: Date,
+): Promise<{ date: string; forecast: Forecast; satellite: SatelliteDay | null }[]> {
+	const from = days[0].date;
+	const to = days[days.length - 1].date;
+	const all = days.flatMap((day) => day.locations);
+	// A GXP's forecast point doesn't change with its size, unlike its pixels.
+	const centres = [...new Map(all.map((location) => [location.id, location])).values()];
+	const series: OpenMeteoSeries[] = [];
+	for (const batch of batches(centres)) {
+		const res = await fetch(
+			`${OPEN_METEO_ARCHIVE_URL}?${new URLSearchParams({
+				...coordinates(batch.map((location) => location.forecast)),
+				hourly: [...Object.values(OPEN_METEO_VARIABLES), "temperature_2m"].join(","),
+				models: ARCHIVE_MODEL,
+				...sharedParams(from, to),
+			})}`,
+		);
+		if (!res.ok) throw new WeatherFetchError(`Open-Meteo archive request failed (${res.status}): ${await res.text()}`);
+		const body = await res.json<OpenMeteoArchive | OpenMeteoArchive[]>();
+		series.push(...(Array.isArray(body) ? body : [body]).map(({ hourly }) => hourly));
+	}
+	const variables = [...Object.values(OPEN_METEO_VARIABLES), "temperature_2m"];
+	// Like the forecast, the archive might send every value as null and be fine later.
+	if (series.every((location) => variables.every((variable) => location[variable].every((value) => value === null)))) {
+		throw new WeatherFetchError(`Open-Meteo sent no ERA5 weather from ${from} to ${to}; try again later`);
+	}
+	const seriesAt = new Map(centres.map((location, i) => [location.id, series[i]]));
+	const times = series[0].time.map((seconds) => seconds * 1000);
+	const dates = times.map((time) => nzDate(new Date(time)));
+
+	const readings = await fetchSatelliteReadings(all, previousDate(from), to);
+	if ([...readings.pixels.values()].every((pixel) => pixel[OPEN_METEO_VARIABLES.ghiWm2].every((value) => value === null))) {
+		throw new WeatherFetchError(`Open-Meteo sent no satellite readings from ${from} to ${to}; try again later`);
+	}
+
+	return days.flatMap(({ date, locations }) => {
+		const onDay = dates.map((day) => day === date);
+		const ofDay = <T>(values: T[]) => values.filter((_, i) => onDay[i]);
+		const hasGaps = locations.some((location) =>
+			variables.some((variable) => ofDay(seriesAt.get(location.id)![variable]).includes(null)),
+		);
+		if (hasGaps) return [];
+
+		const forecast: Forecast = {
+			format: CACHE_FORMAT,
+			date,
+			fetchedAt: now.toISOString(),
+			model: ARCHIVE_MODEL,
+			times: ofDay(times),
+			locations: Object.fromEntries(
+				locations.map((location) => {
+					const hourly = seriesAt.get(location.id)!;
+					const weather: LocationWeather = {
+						lat: location.forecast.lat,
+						long: location.forecast.long,
+						temperatureC: ofDay(hourly.temperature_2m) as number[],
+						ghiWm2: ofDay(hourly[OPEN_METEO_VARIABLES.ghiWm2]) as number[],
+						dniWm2: ofDay(hourly[OPEN_METEO_VARIABLES.dniWm2]) as number[],
+						dhiWm2: ofDay(hourly[OPEN_METEO_VARIABLES.dhiWm2]) as number[],
+					};
+					return [location.id, weather];
+				}),
+			),
+			points: Object.fromEntries(locations.map((location) => [location.id, forecastPoint(location)])),
+		};
+		let satellite: SatelliteDay | null = null;
+		try {
+			satellite = satelliteDay(readings, locations, date, now);
+		} catch (error) {
+			if (!(error instanceof WeatherFetchError)) throw error;
+		}
+		return [{ date, forecast, satellite }];
+	});
+}
+
 // Himawari-9 irradiance every 10 minutes on a ~5 km grid, averaged over each
 // location's pixels by their weights. Readings not taken yet come back as
 // null.
 async function fetchSatellite(locations: WeatherLocation[], date: string, now: Date): Promise<SatelliteDay> {
+	// The archive takes no date after today's in UTC, which until midday in NZ
+	// is still yesterday, so it's asked for the UTC days the NZ day spans and
+	// cut down to it.
+	const readings = await fetchSatelliteReadings(
+		locations,
+		previousDate(date),
+		[date, now.toISOString().slice(0, 10)].sort()[0],
+	);
+	return satelliteDay(readings, locations, date, now);
+}
+
+// Each of the locations' pixels' readings over whole UTC days, by where it is.
+interface SatelliteReadings {
+	times: number[];
+	dates: string[]; // each time's NZ date
+	pixels: Map<string, OpenMeteoSeries>;
+}
+
+async function fetchSatelliteReadings(
+	locations: WeatherLocation[],
+	from: string,
+	to: string,
+): Promise<SatelliteReadings> {
 	// Neighbouring GXPs' people can share a pixel, which is only asked for once.
 	const pixels = [
 		...new Map(locations.flatMap((location) => location.pixels.map((pixel) => [point(pixel), pixel] as const))).values(),
@@ -291,11 +467,8 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 				hourly: Object.values(OPEN_METEO_VARIABLES).join(","),
 				temporal_resolution: "native",
 				models: "jma_jaxa_himawari",
-				// The archive takes no date after today's in UTC, which until
-				// midday in NZ is still yesterday, so it's asked for the UTC days
-				// the NZ day spans and cut down to it.
-				start_date: previousDate(date),
-				end_date: [date, now.toISOString().slice(0, 10)].sort()[0],
+				start_date: from,
+				end_date: to,
 				timeformat: "unixtime",
 			})}`,
 		);
@@ -304,26 +477,41 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		readings.push(...(Array.isArray(body) ? body : [body]));
 	}
 	const times = readings[0].hourly.time.map((seconds) => seconds * 1000);
-	const onDay = times.map((time) => nzDate(new Date(time)) === date);
+	return {
+		times,
+		dates: times.map((time) => nzDate(new Date(time))),
+		pixels: new Map(pixels.map((pixel, i) => [point(pixel), readings[i].hourly])),
+	};
+}
+
+// An NZ day's readings, averaged over each location's pixels.
+function satelliteDay(
+	readings: SatelliteReadings,
+	locations: WeatherLocation[],
+	date: string,
+	now: Date,
+): SatelliteDay {
+	const onDay = readings.dates.map((day) => day === date);
 	const ofDay = <T>(values: T[]) => values.filter((_, i) => onDay[i]);
-	if (readings.every(({ hourly }) => ofDay(hourly[OPEN_METEO_VARIABLES.ghiWm2]).every((value) => value === null))) {
-		throw new WeatherFetchError("every reading was empty");
-	}
-	const readingsAt = new Map(pixels.map((pixel, i) => [point(pixel), readings[i].hourly]));
+	const pixelsOf = (location: WeatherLocation) => location.pixels.map((pixel) => readings.pixels.get(point(pixel))!);
+	const empty = locations.every((location) =>
+		pixelsOf(location).every((pixel) => ofDay(pixel[OPEN_METEO_VARIABLES.ghiWm2]).every((value) => value === null)),
+	);
+	if (empty) throw new WeatherFetchError("every reading was empty");
 
 	return {
 		format: CACHE_FORMAT,
 		date,
 		fetchedAt: now.toISOString(),
-		times: ofDay(times),
+		times: ofDay(readings.times),
 		locations: Object.fromEntries(
-			locations.map(({ id, pixels: own }) => {
+			locations.map((location) => {
 				const average = (component: Component) =>
 					averagePixels(
-						own.map((pixel) => ofDay(readingsAt.get(point(pixel))![OPEN_METEO_VARIABLES[component]])),
-						own.map((pixel) => pixel.weight),
+						pixelsOf(location).map((pixel) => ofDay(pixel[OPEN_METEO_VARIABLES[component]])),
+						location.pixels.map((pixel) => pixel.weight),
 					);
-				return [id, { ghiWm2: average("ghiWm2"), dniWm2: average("dniWm2"), dhiWm2: average("dhiWm2") }];
+				return [location.id, { ghiWm2: average("ghiWm2"), dniWm2: average("dniWm2"), dhiWm2: average("dhiWm2") }];
 			}),
 		),
 		pixels: Object.fromEntries(locations.map((location) => [location.id, satellitePixels(location)])),
@@ -371,12 +559,12 @@ function coordinates(points: { lat: number; long: number }[]) {
 	};
 }
 
-function sharedParams(date: string) {
+function sharedParams(from: string, to = from) {
 	return {
-		// The NZ day, with times returned as UTC instants so DST can't shift them.
+		// NZ days, with times returned as UTC instants so DST can't shift them.
 		timezone: "Pacific/Auckland",
-		start_date: date,
-		end_date: date,
+		start_date: from,
+		end_date: to,
 		timeformat: "unixtime",
 	};
 }

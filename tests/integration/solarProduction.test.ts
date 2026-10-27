@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { tenMinuteKey } from "../../src/aggregates/store";
 import { estimateKey } from "../../src/production/job";
 
 // 2pm on Monday 26 October in NZ.
@@ -58,6 +59,24 @@ describe("GET /solar-production[/{date}]", () => {
 
 		expect((await getProduction()).body.result.date).toBe("2026-10-27");
 		expect((await getProduction("/yesterday")).body.result.date).toBe("2026-10-26");
+	});
+
+	it("serves a day before yesterday as the aggregate job last estimated it", async () => {
+		const recalculated = { ...estimateFor("2026-10-20"), time: NOW + 1000 };
+		await env.DATASET.put(tenMinuteKey("2026-10-20"), JSON.stringify(recalculated));
+		// From before the production job started.
+		await env.DATASET.put(tenMinuteKey("2016-01-01"), JSON.stringify(estimateFor("2016-01-01")));
+
+		expect((await getProduction("/2026-10-20")).body.result).toEqual(recalculated);
+		expect((await getProduction("/2016-01-01")).body.result).toEqual(estimateFor("2016-01-01"));
+	});
+
+	it("serves yesterday as the production job last stored it, or failing that the aggregate job", async () => {
+		await env.DATASET.put(tenMinuteKey("2026-10-25"), JSON.stringify({ ...estimateFor("2026-10-25"), time: NOW - 1000 }));
+		expect((await getProduction("/yesterday")).body.result).toEqual(estimateFor("2026-10-25"));
+
+		await env.DATASET.delete(estimateKey("2026-10-25"));
+		expect((await getProduction("/yesterday")).body.result.time).toBe(NOW - 1000);
 	});
 
 	it("returns 404 for a day with no estimate stored", async () => {

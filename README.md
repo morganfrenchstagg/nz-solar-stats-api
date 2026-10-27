@@ -43,7 +43,9 @@ Endpoints:
 - `GET /solar-capacity?month=YYYY-MM`: every GXP at a month end (latest by default), with a national total
 - `GET /solar-capacity/{gxp}`: one GXP's monthly history, plus the dispatched farm steps removed from it
 - `GET /solar-production`: the latest estimate of every GXP's distributed solar output, as at when it was made, with a 10-minute profile for today (NZ time)
-- `GET /solar-production/{date}`: the same 10-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), for any day the production job has stored. Only today has live values.
+- `GET /solar-production/{date}`: the same 10-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), back to July 2015 (see [Aggregates](#aggregates)). Only today has live values.
+- `GET /solar-energy/daily/{YYYY-MM}`, `/solar-energy/weekly/{YYYY}`, `/solar-energy/monthly/{YYYY}`, `/solar-energy/annual`: estimated energy at every GXP, in MWh, for each day of a month, ISO week (Monday to Sunday) of a year, month of a year, or year
+- `GET /solar-energy`: how far the backfill has got, and how many days are being estimated again
 
 ## Solar production job
 
@@ -77,7 +79,29 @@ The estimate runs every 10 minutes, the satellite's own interval, so its reading
 
 The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 
-The job keeps each day's weather in D1, so it only asks Open-Meteo for what's due. The forecast is refreshed at most every three hours, and the satellite at most every half hour from 10am to 4pm and hourly otherwise while the sun's up, so its latest reading is half an hour to an hour and a half old; a past day's of each is kept for good. Each cached day records where every GXP's weather was taken, so it's refetched once a GXP's points move: when `gxpLocations.json` is rebuilt, or a GXP grows past 5 MW and gets five pixels. A day Open-Meteo no longer has keeps its weather from the old points. Days cached in an older format (`CACHE_FORMAT` in `src/production/weather.ts`) are fetched again once, and can't be kept. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one (a pixel neighbouring GXPs share is asked for once, leaving about 310): a day of the job takes about 8,000, nearer 8,700 on December's long days. Forecast responses with gaps fail that day's estimate rather than being cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
+The job keeps each day's weather in D1, so it only asks Open-Meteo for what's due. The forecast is refreshed at most every three hours, and the satellite at most every half hour from 10am to 4pm and hourly otherwise while the sun's up, so its latest reading is half an hour to an hour and a half old; a past day's of each is kept for good. Each cached day records where every GXP's weather was taken, so it's refetched once a GXP's points move: when `gxpLocations.json` is rebuilt, or a GXP grows past 5 MW and gets five pixels. A day Open-Meteo no longer has keeps its weather from the old points. Days cached in an older format (`CACHE_FORMAT` in `src/production/weather.ts`) are fetched again once, and can't be kept. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one (a pixel neighbouring GXPs share is asked for once, leaving about 310): a day of the job takes about 8,000, nearer 8,700 on December's long days. Forecast responses with gaps fail that day's estimate rather than being cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; ERA5 from the Copernicus Climate Change Service; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
+
+### Aggregates
+
+Two more cron triggers keep every day's estimate from July 2015, when Himawari-8's readings start, and add them up into energy (`src/aggregates`). Like electricitymap's, they're files in the `nz-solar-stats-dataset` bucket:
+
+- `aggregates/10-minute/YYYY-MM-DD.json`: a day's estimate every 10 minutes, the same as the production job's. `/solar-production/{date}` serves these for days before yesterday, falling back to the production job's file.
+- `aggregates/daily/YYYY-MM.json`: each day's energy in a month
+- `aggregates/weekly/YYYY.json`: each ISO week's in an ISO year (a week spanning new year belongs to the year its Thursday is in)
+- `aggregates/monthly/YYYY.json`: each month's in a year
+- `aggregates/annual.json`: each year's
+
+Each period has its first and last date, `days` (how many of its days are estimated so far, as the backfill fills them in), `totalMwh` and each GXP's MWh. A day's energy is each 10-minute step's output held for 10 minutes, so the days daylight saving starts and ends have 23 and 25 hours.
+
+Every 10 minutes, five minutes after the production job, the aggregate job estimates up to 100 days, newest first, then sums the weeks, months and years they're in again from their days. A day is estimated once it has weather, and again whenever any of these changes from what it was estimated with, which the `production_days` table in D1 records for each day:
+
+- **The model.** Its fingerprint (`src/aggregates/model.ts`) is a hash of a made-up reference day, estimated and added up as a real one is: the rooftop and farm arrays, the tilt and sun maths, blending the satellite with the forecast, capacity growth, the 10-minute steps and the energy sum all go into it, so a change to any of them changes the fingerprint by itself. So does `gxpLocations.json` and the weather cache format. A change the reference day can't show, such as to how weather is fetched, needs `MODEL_REVISION` bumped. Once a new fingerprint is deployed, every day is due again: about seven hours of runs for over 4,000 days, the latest first.
+- **A day's capacities.** When the capacity job's fingerprint changes, the aggregate job works out every estimated day's capacities again and re-estimates the days whose capacities differ. A new EMI month end usually changes the days after the one before it, which were grown from that.
+- **A day's weather.** Yesterday is estimated from the production job's weather in D1, again each time it's refreshed, until it's final. Days before that keep that weather if it was final, and otherwise get the archive's.
+
+Days the production job never saw, and days whose weather was taken where a GXP's isn't any more (after `gxpLocations.json` is rebuilt, or a GXP passes 5 MW), get their weather from the weather archive job. Twice a day, at NZ night when the production job asks Open-Meteo for least, it fetches a fortnight of such days, newest first: Himawari readings from the satellite archive as before, and ERA5's hourly temperature (and sunlight, where the satellite has none) from Open-Meteo's historical weather API (`era5_seamless`: ERA5-Land's 0.1° grid, filled in from ERA5's 0.25°), instead of the forecast. ERA5 is about five days behind, so the archive is only asked for days at least six days old; a day it doesn't have yet is asked for again a week later. Each day's weather is stored in R2 at `weather/YYYY-MM-DD.json`. Days with no weather come first, so after `gxpLocations.json` is rebuilt every day's weather is fetched again behind the backfill, as slowly; until then each day keeps its estimate from the old points.
+
+Open-Meteo counts a location's fortnight as one call, so each fetch is about 430 calls (fewer in earlier years, with fewer and smaller GXPs), about 870 a day on top of the production job's 8,000–8,700. At a fortnight per fetch, two fetches a day backfill 28 days a day: the latest year in about two weeks, back to July 2015 in about five months. Adding fetch times to the `35 10,14 * * *` cron goes faster, if Open-Meteo's limit allows. The full backfill takes about 2.3 GB of R2: 460 KB of weather and 100 KB of estimate a day.
 
 ### Backtesting
 
@@ -101,13 +125,15 @@ npm run backtest:pvoutput -- ISL --systems 12345 --from 2026-08-27 --to 2026-10-
 
 It needs `PVOUTPUT_API_KEY` and `PVOUTPUT_SYSTEM_ID` from your PVOutput Settings page, e.g. in `.env` (gitignored). Searching works with any key, but reading other people's systems needs Donation mode on your account; your own system doesn't. Free keys allow 60 requests an hour (300 with Donation mode), and each system takes about three. Each system is modelled at its own location with the capacity the registry would record: the lower of its panel and inverter ratings.
 
-To run them locally, the capacity job first, then the production job (R2 is simulated locally too):
+To run them locally, the capacity job first, then the production job, the weather archive job and the aggregate job (R2 is simulated locally too):
 
 ```bash
 npx wrangler d1 migrations apply DB --local
 npx wrangler dev --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=0+18+*+*+*"
 curl "http://localhost:8787/__scheduled?cron=*/10+*+*+*+*"
+curl "http://localhost:8787/__scheduled?cron=35+10%2C14+*+*+*"
+curl "http://localhost:8787/__scheduled?cron=5%2C15%2C25%2C35%2C45%2C55+*+*+*+*"
 ```
 
 ## Getting Started

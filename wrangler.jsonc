@@ -11,10 +11,14 @@
 		"directory": "./public"
 	},
 	"triggers": {
-		// Daily at 6–7am NZ time, refreshing GXP solar capacity from EMI; and
-		// every 10 minutes, estimating solar output into DATASET (see
-		// src/index.ts, which tells them apart by these strings)
-		"crons": ["0 18 * * *", "*/10 * * * *"]
+		// Daily at 6–7am NZ time, refreshing GXP solar capacity from EMI;
+		// every 10 minutes, estimating solar output into DATASET; five minutes
+		// after each of those, estimating past days again where anything's
+		// changed and adding them up into energy; and twice a day (NZ night,
+		// when the production job asks Open-Meteo for least), fetching a
+		// fortnight of past weather to backfill from. src/index.ts tells them
+		// apart by these strings.
+		"crons": ["0 18 * * *", "*/10 * * * *", "5,15,25,35,45,55 * * * *", "35 10,14 * * *"]
 	},
 	"d1_databases": [
 		{
@@ -25,7 +29,8 @@
 	],
 	"r2_buckets": [
 		{
-			// Each NZ date's solar production estimate, one JSON file per day
+			// Each NZ date's solar production estimate, one JSON file per day;
+			// past weather and the aggregates built from it (src/aggregates)
 			"binding": "DATASET",
 			"bucket_name": "nz-solar-stats-dataset"
 		}
