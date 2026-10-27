@@ -11,14 +11,23 @@
 		"directory": "./public"
 	},
 	"triggers": {
-		// Daily at 6–7am NZ time, refreshing GXP solar capacity from EMI
-		"crons": ["0 18 * * *"]
+		// Daily at 6–7am NZ time, refreshing GXP solar capacity from EMI; and
+		// every 10 minutes, estimating solar output into DATASET (see
+		// src/index.ts, which tells them apart by these strings)
+		"crons": ["0 18 * * *", "*/10 * * * *"]
 	},
 	"d1_databases": [
 		{
 			"binding": "DB",
 			"database_name": "openapi-template-db",
 			"database_id": "3a12e8fb-6c1d-4b07-81de-5fb40db42cf3"
+		}
+	],
+	"r2_buckets": [
+		{
+			// Each NZ date's solar production estimate, one JSON file per day
+			"binding": "DATASET",
+			"bucket_name": "nz-solar-stats-dataset"
 		}
 	]
 }
