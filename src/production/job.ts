@@ -1,7 +1,7 @@
 import { capacityAt, type CapacityMonth } from "./capacity";
 import { estimateProduction, round } from "./estimate";
 import { gxpWeatherPoints, POPULATION_SOURCE } from "./locations";
-import { getWeather, nzDate, previousDate } from "./weather";
+import { ARCHIVE_MODEL, type DayWeather, getWeather, nzDate, previousDate, type WeatherLocation } from "./weather";
 
 // No GXP had solar by the date, or the capacity job hasn't run yet.
 export class NoCapacityError extends Error {}
@@ -41,8 +41,6 @@ export async function runProductionJob(env: Env, now = new Date()): Promise<stri
 // Every GXP's distributed solar output through an NZ date, and at `now` if
 // it's today.
 export async function estimateDay(db: D1Database, date: string, now: Date) {
-	const isToday = date === nzDate(now);
-
 	// Each GXP's recent month-end snapshots: its capacity on the date is the
 	// latest plus growth since at its recent rate (see production/capacity.ts).
 	const { results: months } = await db
@@ -55,15 +53,37 @@ export async function estimateDay(db: D1Database, date: string, now: Date) {
 			ORDER BY c.gxp, c.month_end`,
 		)
 		.bind(date)
-		.all<CapacityMonth & { gxp: string; name: string; lat: number; long: number }>();
+		.all<GxpCapacityMonth>();
 	// Every farm-sized step a GXP has had is modelled as a farm.
 	const { results: farms } = await db
 		.prepare("SELECT gxp, round(sum(step_mw), 3) AS farmMw FROM solar_capacity WHERE month_end <= ? GROUP BY gxp")
 		.bind(date)
 		.all<{ gxp: string; farmMw: number }>();
-	const farmMw = new Map(farms.map((farm) => [farm.gxp, farm.farmMw]));
+	const capacity = gxpCapacities(months, new Map(farms.map((farm) => [farm.gxp, farm.farmMw])), date);
+
+	const weather = await getWeather(db, capacity.gxps.map(weatherLocation), date, now);
+	return productionEstimate(date, capacity, weather, date === nzDate(now) ? now : null, now);
+}
+
+// A month-end snapshot of a GXP's capacity, and where the GXP is.
+export interface GxpCapacityMonth extends CapacityMonth {
+	gxp: string;
+	name: string;
+	lat: number;
+	long: number;
+}
+
+export interface GxpCapacities {
+	capacityMonthEnd: string;
+	gxps: { gxp: string; name: string; lat: number; long: number; distributedMw: number; farmMw: number; growthMwPerMonth: number }[];
+}
+
+// Each GXP with solar's capacity on a date, largest first, from its snapshots
+// in the 14 months to the date (by GXP, then month end), and all the
+// farm-sized steps it's had by then.
+export function gxpCapacities(months: GxpCapacityMonth[], farmMw: Map<string, number>, date: string): GxpCapacities {
 	const capacityMonthEnd = months.reduce((latest, month) => (month.monthEnd > latest ? month.monthEnd : latest), "");
-	const histories = new Map<string, typeof months>();
+	const histories = new Map<string, GxpCapacityMonth[]>();
 	for (const month of months) histories.set(month.gxp, [...(histories.get(month.gxp) ?? []), month]);
 	const gxps = [...histories.values()]
 		// A GXP missing from the latest snapshot has left EMI's data.
@@ -86,19 +106,30 @@ export async function estimateDay(db: D1Database, date: string, now: Date) {
 	if (gxps.length === 0) {
 		throw new NoCapacityError(`No solar capacity as at ${date}`);
 	}
+	return { capacityMonthEnd, gxps };
+}
 
-	const weather = await getWeather(
-		db,
-		gxps.map(({ gxp, lat, long, distributedMw }) => ({ id: gxp, ...gxpWeatherPoints(gxp, { lat, long }, distributedMw) })),
-		date,
-		now,
-	);
+// Where a GXP's weather is taken.
+export function weatherLocation({ gxp, lat, long, distributedMw }: GxpCapacities["gxps"][number]): WeatherLocation {
+	return { id: gxp, ...gxpWeatherPoints(gxp, { lat, long }, distributedMw) };
+}
+
+// The estimate as stored and served: each GXP's output through the day, and
+// at `at` if given (today's, as at now).
+export function productionEstimate(
+	date: string,
+	{ capacityMonthEnd, gxps }: GxpCapacities,
+	weather: DayWeather,
+	at: Date | null,
+	now: Date,
+) {
 	const estimates = estimateProduction(
 		gxps.map(({ gxp, name, distributedMw, farmMw }) => ({ gxp, name, distributedMw, farmMw })),
 		weather,
-		isToday ? now : null,
+		at,
 	);
 	const sum = (values: number[]) => round(values.reduce((total, value) => total + value, 0));
+	const temperatures = weather.model === ARCHIVE_MODEL ? ", with temperatures from Copernicus ERA5" : "";
 
 	return {
 		time: now.toISOString(),
@@ -106,14 +137,16 @@ export async function estimateDay(db: D1Database, date: string, now: Date) {
 		capacityMonthEnd,
 		weatherFetchedAt: weather.fetchedAt,
 		observedUntil: weather.observedUntil === null ? null : new Date(weather.observedUntil).toISOString(),
-		attribution: `Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari; population from ${POPULATION_SOURCE}`,
+		attribution: `Weather data by Open-Meteo.com (CC BY 4.0)${temperatures}; satellite data from JMA/JAXA Himawari; population from ${POPULATION_SOURCE}`,
 		profileTimes: weather.times.map((time) => new Date(time).toISOString()),
 		total: {
 			distributedMw: sum(estimates.map((estimate) => estimate.distributedMw)),
 			farmMw: sum(estimates.map((estimate) => estimate.farmMw)),
-			productionMw: isToday ? sum(estimates.map((estimate) => estimate.productionMw ?? 0)) : null,
+			productionMw: at ? sum(estimates.map((estimate) => estimate.productionMw ?? 0)) : null,
 			profileMw: weather.times.map((_, index) => sum(estimates.map((estimate) => estimate.profileMw[index]))),
 		},
 		gxps: estimates.map((estimate, i) => ({ ...estimate, growthMwPerMonth: gxps[i].growthMwPerMonth })),
 	};
 }
+
+export type ProductionEstimate = ReturnType<typeof productionEstimate>;

@@ -4,8 +4,17 @@ import { cors } from "hono/cors";
 import { tasksRouter } from "./endpoints/tasks/router";
 import { ContentfulStatusCode } from "hono/utils/http-status";
 import { DummyEndpoint } from "./endpoints/dummyEndpoint";
+import { runWeatherArchiveJob } from "./aggregates/archive";
+import { runAggregateJob } from "./aggregates/job";
 import { runCapacityJob } from "./capacity/job";
 import { solarCapacityRouter } from "./endpoints/solarCapacity/router";
+import {
+	SolarEnergyAnnual,
+	SolarEnergyCoverage,
+	SolarEnergyDaily,
+	SolarEnergyMonthly,
+	SolarEnergyWeekly,
+} from "./endpoints/solarEnergy";
 import { SolarProductionForDate, SolarProductionToday } from "./endpoints/solarProduction";
 import { runProductionJob } from "./production/job";
 
@@ -52,6 +61,11 @@ const openapi = fromHono(app, {
 openapi.route("/solar-capacity", solarCapacityRouter);
 openapi.get("/solar-production", SolarProductionToday);
 openapi.get("/solar-production/:date", SolarProductionForDate);
+openapi.get("/solar-energy", SolarEnergyCoverage);
+openapi.get("/solar-energy/daily/:month", SolarEnergyDaily);
+openapi.get("/solar-energy/weekly/:year", SolarEnergyWeekly);
+openapi.get("/solar-energy/monthly/:year", SolarEnergyMonthly);
+openapi.get("/solar-energy/annual", SolarEnergyAnnual);
 
 // Register Tasks Sub router
 openapi.route("/tasks", tasksRouter);
@@ -72,6 +86,12 @@ export default {
 				// seconds late, so weather that's refreshed every half hour is
 				// refreshed on the half hour and not one run later.
 				await runProductionJob(env, new Date(controller.scheduledTime));
+				break;
+			case "5,15,25,35,45,55 * * * *":
+				await runAggregateJob(env, new Date(controller.scheduledTime));
+				break;
+			case "35 10,14 * * *":
+				await runWeatherArchiveJob(env, new Date(controller.scheduledTime));
 				break;
 			default:
 				throw new Error(`No job for cron ${controller.cron}`);

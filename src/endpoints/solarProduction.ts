@@ -1,5 +1,6 @@
 import { contentJson, NotFoundException, OpenAPIRoute } from "chanfana";
 import { z } from "zod";
+import { tenMinuteKey } from "../aggregates/store";
 import { estimateKey } from "../production/job";
 import { nzDate, previousDate } from "../production/weather";
 import { AppContext } from "../types";
@@ -79,7 +80,7 @@ export class SolarProductionForDate extends OpenAPIRoute {
 	public schema = {
 		tags: ["Solar production"],
 		summary: "Estimate of distributed solar output at every GXP on an NZ date",
-		description: `${description} Every day's estimate is kept, from when the job started up to today; future days have none. Capacities are as at the last month end on or before the date, and only today has live values.`,
+		description: `${description} Days before yesterday are backfilled from July 2015 (when the satellite's readings start), and estimated again whenever the model, their capacities or their weather change; days the production job didn't see take their temperature from Copernicus ERA5. Future days have none. Capacities are as at the last month end on or before the date, plus growth since, and only today has live values.`,
 		request: {
 			params: z.object({
 				date: z
@@ -97,14 +98,17 @@ export class SolarProductionForDate extends OpenAPIRoute {
 	}
 }
 
-// The day's estimate as the production job last stored it.
+// The day's estimate as the production job last stored it, or for a day
+// it's done with, as the aggregate job did: that's estimated again whenever
+// the model changes, and goes back before the production job started.
 async function storedEstimate(bucket: R2Bucket, requested: string) {
 	const today = nzDate(new Date());
-	const date =
-		requested === "today" ? today : requested === "yesterday" ? previousDate(today) : requested;
-	const stored = await bucket.get(estimateKey(date));
-	if (!stored) {
-		throw new NotFoundException(`No estimate for ${date}`);
+	const yesterday = previousDate(today);
+	const date = requested === "today" ? today : requested === "yesterday" ? yesterday : requested;
+	const keys = date >= yesterday ? [estimateKey(date), tenMinuteKey(date)] : [tenMinuteKey(date), estimateKey(date)];
+	for (const key of keys) {
+		const stored = await bucket.get(key);
+		if (stored) return { success: true, result: await stored.json() };
 	}
-	return { success: true, result: await stored.json() };
+	throw new NotFoundException(`No estimate for ${date}`);
 }
