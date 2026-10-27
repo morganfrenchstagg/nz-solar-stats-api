@@ -42,8 +42,14 @@ Endpoints:
 
 - `GET /solar-capacity?month=YYYY-MM`: every GXP at a month end (latest by default), with a national total
 - `GET /solar-capacity/{gxp}`: one GXP's monthly history, plus the dispatched farm steps removed from it
-- `GET /solar-production`: a live estimate of every GXP's distributed solar output now, with a 10-minute profile for today (NZ time)
-- `GET /solar-production/{date}`: the same 10-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), from about three months ago to two weeks ahead (as far as Open-Meteo has weather). Only today has live values.
+- `GET /solar-production`: the latest estimate of every GXP's distributed solar output, as at when it was made, with a 10-minute profile for today (NZ time)
+- `GET /solar-production/{date}`: the same 10-minute profile for an NZ date (`YYYY-MM-DD`, `today` or `yesterday`), for any day the production job has stored. Only today has live values.
+
+## Solar production job
+
+A second cron trigger, every 10 minutes, estimates yesterday's and today's solar output (`src/production/job.ts`) and stores each NZ date as one JSON file in the `nz-solar-stats-dataset` R2 bucket (binding `DATASET`), at `solar-production/YYYY-MM-DD.json`, replacing the last. The `/solar-production` endpoints only read these files, so a request never calls Open-Meteo or works anything out. Today's file has live values as at the run, which is its `time`. Yesterday's is redone through the day after, so it ends up with the satellite's last readings and the forecast fetched once the day was over; older days are kept as they were, building up a history from when the job started. Future days aren't estimated.
+
+Each run is estimated as at the time it was due rather than when it started, a few seconds late, so the weather refreshed every half hour is refreshed on the half hour and not a run later. A day that fails, such as when Open-Meteo is down, leaves its last file in place; the other day is still stored, and the run then fails naming it, to be tried again 10 minutes later.
 
 EMI only publishes month-end snapshots, a few weeks after each month. So each GXP's capacity on a date is its latest snapshot on or before it, plus growth since at its recent rate (`src/production/capacity.ts`): an exponentially weighted average of the last year's month-on-month changes, each counting half as much as one three months newer. Farm-sized steps that aren't dispatched, such as Rānui's 10 MW at Blenheim, are stored as `step_mw` and left out of the rate, since they're one-offs. Predicting each month-end from the one before over 2024–26, this cut the NZ total's miss from 13.1 MW (always short) to 2.9 MW, and the average GXP's from 0.127 to 0.084 MW.
 
@@ -71,7 +77,7 @@ The estimate runs every 10 minutes, the satellite's own interval, so its reading
 
 The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 
-Weather is cached in D1 per date. The forecast is refreshed at most every three hours, and the satellite at most every half hour from 10am to 4pm and hourly otherwise while the sun's up, so its latest reading is half an hour to an hour and a half old; a past day's of each is kept for good. Each cached day records where every GXP's weather was taken, so it's refetched once a GXP's points move: when `gxpLocations.json` is rebuilt, or a GXP grows past 5 MW and gets five pixels. A day Open-Meteo no longer has keeps its weather from the old points. Days cached in an older format (`CACHE_FORMAT` in `src/production/weather.ts`) are fetched again once, and can't be kept. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one (a pixel neighbouring GXPs share is asked for once, leaving about 310): a day of steady use takes about 8,000, nearer 8,700 on December's long days, and each new past date about 430. Forecast responses with gaps are rejected with a 502 rather than cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
+The job keeps each day's weather in D1, so it only asks Open-Meteo for what's due. The forecast is refreshed at most every three hours, and the satellite at most every half hour from 10am to 4pm and hourly otherwise while the sun's up, so its latest reading is half an hour to an hour and a half old; a past day's of each is kept for good. Each cached day records where every GXP's weather was taken, so it's refetched once a GXP's points move: when `gxpLocations.json` is rebuilt, or a GXP grows past 5 MW and gets five pixels. A day Open-Meteo no longer has keeps its weather from the old points. Days cached in an older format (`CACHE_FORMAT` in `src/production/weather.ts`) are fetched again once, and can't be kept. Open-Meteo's free limit is 10,000 calls a day, with each GXP or satellite pixel counting as one (a pixel neighbouring GXPs share is asked for once, leaving about 310): a day of the job takes about 8,000, nearer 8,700 on December's long days. Forecast responses with gaps fail that day's estimate rather than being cached. Weather data by Open-Meteo.com, licensed CC BY 4.0; satellite data from JMA/JAXA Himawari; population data from Kontur, licensed CC BY 4.0.
 
 ### Backtesting
 
@@ -95,12 +101,13 @@ npm run backtest:pvoutput -- ISL --systems 12345 --from 2026-08-27 --to 2026-10-
 
 It needs `PVOUTPUT_API_KEY` and `PVOUTPUT_SYSTEM_ID` from your PVOutput Settings page, e.g. in `.env` (gitignored). Searching works with any key, but reading other people's systems needs Donation mode on your account; your own system doesn't. Free keys allow 60 requests an hour (300 with Donation mode), and each system takes about three. Each system is modelled at its own location with the capacity the registry would record: the lower of its panel and inverter ratings.
 
-To run it locally:
+To run them locally, the capacity job first, then the production job (R2 is simulated locally too):
 
 ```bash
 npx wrangler d1 migrations apply DB --local
 npx wrangler dev --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=0+18+*+*+*"
+curl "http://localhost:8787/__scheduled?cron=*/10+*+*+*+*"
 ```
 
 ## Getting Started

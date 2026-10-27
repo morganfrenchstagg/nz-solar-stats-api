@@ -7,6 +7,7 @@ import { DummyEndpoint } from "./endpoints/dummyEndpoint";
 import { runCapacityJob } from "./capacity/job";
 import { solarCapacityRouter } from "./endpoints/solarCapacity/router";
 import { SolarProductionForDate, SolarProductionToday } from "./endpoints/solarProduction";
+import { runProductionJob } from "./production/job";
 
 // Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
@@ -60,7 +61,20 @@ openapi.post("/dummy/:slug", DummyEndpoint);
 
 export default {
 	fetch: app.fetch,
-	async scheduled(_controller, env) {
-		await runCapacityJob(env);
+	// The crons are wrangler.jsonc's.
+	async scheduled(controller, env) {
+		switch (controller.cron) {
+			case "0 18 * * *":
+				await runCapacityJob(env);
+				break;
+			case "*/10 * * * *":
+				// As at the time it was due rather than when it started, a few
+				// seconds late, so weather that's refreshed every half hour is
+				// refreshed on the half hour and not one run later.
+				await runProductionJob(env, new Date(controller.scheduledTime));
+				break;
+			default:
+				throw new Error(`No job for cron ${controller.cron}`);
+		}
 	},
 } satisfies ExportedHandler<Env>;

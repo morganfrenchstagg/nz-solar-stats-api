@@ -1,24 +1,8 @@
-import { ApiException, contentJson, NotFoundException, OpenAPIRoute } from "chanfana";
+import { contentJson, NotFoundException, OpenAPIRoute } from "chanfana";
 import { z } from "zod";
-import { capacityAt, type CapacityMonth } from "../production/capacity";
-import { estimateProduction, round } from "../production/estimate";
-import { gxpWeatherPoints, POPULATION_SOURCE } from "../production/locations";
-import {
-	getWeather,
-	nzDate,
-	previousDate,
-	WeatherFetchError,
-	WeatherUnavailableError,
-} from "../production/weather";
+import { estimateKey } from "../production/job";
+import { nzDate, previousDate } from "../production/weather";
 import { AppContext } from "../types";
-
-// Open-Meteo failed or sent incomplete weather; the request can be retried.
-class BadGatewayException extends ApiException {
-	isVisible = true;
-	default_message = "Bad Gateway";
-	status = 502;
-	code = 7003;
-}
 
 const production = z.object({
 	distributedMw: z
@@ -29,7 +13,10 @@ const production = z.object({
 		.describe(
 			"The part of distributedMw that arrived in farm-sized steps (solar farms too small to be dispatched), modelled as farms rather than rooftops",
 		),
-	productionMw: z.number().nullable().describe("Estimated output now, in MW AC. Null for other days."),
+	productionMw: z
+		.number()
+		.nullable()
+		.describe("Estimated output at time, when the estimate was made, in MW AC. Null for other days."),
 	profileMw: z.array(z.number()).describe("Estimated output at each of profileTimes, in MW AC"),
 });
 
@@ -39,8 +26,8 @@ const gxpProduction = production.extend({
 	irradianceWm2: z
 		.number()
 		.nullable()
-		.describe("Irradiance now on the average rooftop panel. Null for other days."),
-	temperatureC: z.number().nullable().describe("Air temperature now. Null for other days."),
+		.describe("Irradiance on the average rooftop panel at time. Null for other days."),
+	temperatureC: z.number().nullable().describe("Air temperature at time. Null for other days."),
 	growthMwPerMonth: z
 		.number()
 		.describe(
@@ -49,7 +36,7 @@ const gxpProduction = production.extend({
 });
 
 const description =
-	"Each GXP's rooftop solar is modelled as arrays tilted 20° facing the ways NZ roofs do (61% north, 19% north-east or north-west, 20% east or west), converting dim light less efficiently, as fitted to NZ rooftop systems on PVOutput. Farm-sized steps in its capacity, solar farms too small to be dispatched, are modelled as a fixed north-facing farm. Weather is taken where its customers live (from Kontur's population grid) rather than at the substation. Direct and diffuse sunlight are from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) every 10 minutes for any time that has already happened, and Open-Meteo's forecast after that (hourly, interpolated), and are worked onto each array's panels; temperature is from the forecast.";
+	"A scheduled job estimates yesterday and today every 10 minutes and stores each NZ date's estimate as a file; this serves the latest. Each GXP's rooftop solar is modelled as arrays tilted 20° facing the ways NZ roofs do (61% north, 19% north-east or north-west, 20% east or west), converting dim light less efficiently, as fitted to NZ rooftop systems on PVOutput. Farm-sized steps in its capacity, solar farms too small to be dispatched, are modelled as a fixed north-facing farm. Weather is taken where its customers live (from Kontur's population grid) rather than at the substation. Direct and diffuse sunlight are from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) every 10 minutes for any time that has already happened, and Open-Meteo's forecast after that (hourly, interpolated), and are worked onto each array's panels; temperature is from the forecast.";
 
 const responses = {
 	"200": {
@@ -73,19 +60,18 @@ const responses = {
 		}),
 	},
 	...NotFoundException.schema(),
-	...BadGatewayException.schema(),
 };
 
 export class SolarProductionToday extends OpenAPIRoute {
 	public schema = {
 		tags: ["Solar production"],
-		summary: "Live estimate of distributed solar output at every GXP today",
+		summary: "Latest estimate of distributed solar output at every GXP today",
 		description,
 		responses,
 	};
 
 	public async handle(c: AppContext) {
-		return estimateDay(c.env.DB, "today");
+		return storedEstimate(c.env.DATASET, "today");
 	}
 }
 
@@ -93,7 +79,7 @@ export class SolarProductionForDate extends OpenAPIRoute {
 	public schema = {
 		tags: ["Solar production"],
 		summary: "Estimate of distributed solar output at every GXP on an NZ date",
-		description: `${description} Dates can be from about three months ago to two weeks ahead, as far as Open-Meteo has weather. Capacities are as at the last month end on or before the date, and only today has live values.`,
+		description: `${description} Every day's estimate is kept, from when the job started up to today; future days have none. Capacities are as at the last month end on or before the date, and only today has live values.`,
 		request: {
 			params: z.object({
 				date: z
@@ -107,100 +93,18 @@ export class SolarProductionForDate extends OpenAPIRoute {
 
 	public async handle(c: AppContext) {
 		const data = await this.getValidatedData<typeof this.schema>();
-		return estimateDay(c.env.DB, data.params.date);
+		return storedEstimate(c.env.DATASET, data.params.date);
 	}
 }
 
-async function estimateDay(db: D1Database, requested: string) {
-	const now = new Date();
-	const today = nzDate(now);
+// The day's estimate as the production job last stored it.
+async function storedEstimate(bucket: R2Bucket, requested: string) {
+	const today = nzDate(new Date());
 	const date =
 		requested === "today" ? today : requested === "yesterday" ? previousDate(today) : requested;
-	const isToday = date === today;
-
-	// Each GXP's recent month-end snapshots: its capacity on the date is the
-	// latest plus growth since at its recent rate (see production/capacity.ts).
-	const { results: months } = await db
-		.prepare(
-			`SELECT c.gxp, g.name, g.lat, g.long, c.month_end AS monthEnd,
-				round(sum(c.distributed_mw), 3) AS distributedMw, round(sum(c.step_mw), 3) AS stepMw
-			FROM solar_capacity c JOIN gxps g ON g.site_id = c.gxp
-			WHERE c.month_end <= ?1 AND c.month_end > date(?1, '-14 months')
-			GROUP BY c.gxp, c.month_end
-			ORDER BY c.gxp, c.month_end`,
-		)
-		.bind(date)
-		.all<CapacityMonth & { gxp: string; name: string; lat: number; long: number }>();
-	// Every farm-sized step a GXP has had is modelled as a farm.
-	const { results: farms } = await db
-		.prepare("SELECT gxp, round(sum(step_mw), 3) AS farmMw FROM solar_capacity WHERE month_end <= ? GROUP BY gxp")
-		.bind(date)
-		.all<{ gxp: string; farmMw: number }>();
-	const farmMw = new Map(farms.map((farm) => [farm.gxp, farm.farmMw]));
-	const capacityMonthEnd = months.reduce((latest, month) => (month.monthEnd > latest ? month.monthEnd : latest), "");
-	const histories = new Map<string, typeof months>();
-	for (const month of months) histories.set(month.gxp, [...(histories.get(month.gxp) ?? []), month]);
-	const gxps = [...histories.values()]
-		// A GXP missing from the latest snapshot has left EMI's data.
-		.filter((history) => history[history.length - 1].monthEnd === capacityMonthEnd)
-		.map((history) => {
-			const { gxp, name, lat, long } = history[0];
-			const estimate = capacityAt(history, date)!;
-			return {
-				gxp,
-				name,
-				lat,
-				long,
-				distributedMw: round(estimate.capacityMw),
-				farmMw: round(Math.min(farmMw.get(gxp) ?? 0, estimate.capacityMw)),
-				growthMwPerMonth: round(estimate.growthMwPerMonth),
-			};
-		})
-		.filter((gxp) => gxp.distributedMw > 0)
-		.sort((a, b) => b.distributedMw - a.distributedMw);
-	if (gxps.length === 0) {
-		throw new NotFoundException(`No solar capacity as at ${date}`);
+	const stored = await bucket.get(estimateKey(date));
+	if (!stored) {
+		throw new NotFoundException(`No estimate for ${date}`);
 	}
-
-	let weather;
-	try {
-		weather = await getWeather(
-			db,
-			gxps.map(({ gxp, lat, long, distributedMw }) => ({ id: gxp, ...gxpWeatherPoints(gxp, { lat, long }, distributedMw) })),
-			date,
-			now,
-		);
-	} catch (error) {
-		if (error instanceof WeatherUnavailableError) throw new NotFoundException(error.message);
-		if (error instanceof WeatherFetchError) throw new BadGatewayException(error.message);
-		throw error;
-	}
-	const estimates = estimateProduction(
-		gxps.map(({ gxp, name, distributedMw, farmMw }) => ({ gxp, name, distributedMw, farmMw })),
-		weather,
-		isToday ? now : null,
-	);
-	const sum = (values: number[]) => round(values.reduce((total, value) => total + value, 0));
-
-	return {
-		success: true,
-		result: {
-			time: now.toISOString(),
-			date,
-			capacityMonthEnd,
-			weatherFetchedAt: weather.fetchedAt,
-			observedUntil: weather.observedUntil === null ? null : new Date(weather.observedUntil).toISOString(),
-			attribution: `Weather data by Open-Meteo.com (CC BY 4.0); satellite data from JMA/JAXA Himawari; population from ${POPULATION_SOURCE}`,
-			profileTimes: weather.times.map((time) => new Date(time).toISOString()),
-			total: {
-				distributedMw: sum(estimates.map((estimate) => estimate.distributedMw)),
-				farmMw: sum(estimates.map((estimate) => estimate.farmMw)),
-				productionMw: isToday ? sum(estimates.map((estimate) => estimate.productionMw ?? 0)) : null,
-				profileMw: weather.times.map((_, index) =>
-					sum(estimates.map((estimate) => estimate.profileMw[index])),
-				),
-			},
-			gxps: estimates.map((estimate, i) => ({ ...estimate, growthMwPerMonth: gxps[i].growthMwPerMonth })),
-		},
-	};
+	return { success: true, result: await stored.json() };
 }

@@ -7,9 +7,9 @@ const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archiv
 // hours (125 × 8 calls), and the satellite's ~310 pixels at most every half
 // hour from 10am to 4pm, when most of the day's sunlight falls, and hourly
 // otherwise while the sun's up (about 310 × 25 on December's long days), so a
-// day of steady use stays under 9,000. A day that's over doesn't change, so its
-// weather is kept for good, unless a GXP's points have moved since (see
-// gxpWeatherPoints).
+// day of the production job stays under 9,000. A day that's over doesn't
+// change, so its weather is kept for good, unless a GXP's points have moved
+// since (see gxpWeatherPoints).
 const MAX_FORECAST_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_SATELLITE_AGE_MS = 60 * 60 * 1000;
 const MIDDAY_SATELLITE_AGE_MS = 30 * 60 * 1000;
