@@ -12,16 +12,17 @@ export const ARCHIVE_MODEL = "era5_seamless";
 // hours (125 × 8 calls), and the satellite's ~310 pixels at most every half
 // hour from 10am to 4pm, when most of the day's sunlight falls, and hourly
 // otherwise while the sun's up (about 310 × 25 on December's long days), so a
-// day of the production job stays under 9,000. A day that's over doesn't
-// change, so its weather is kept for good, unless a GXP's points have moved
-// since (see gxpWeatherPoints).
+// day of the production job stays under 9,000. Himawari readings usually
+// reach Open-Meteo half an hour after they're taken, but some days hours
+// after, so the pixels are only refetched once one of them has newer
+// readings (see hasNewerReadings). A day that's over doesn't change, so its
+// weather is kept for good, unless a GXP's points have moved since (see
+// gxpWeatherPoints).
 const MAX_FORECAST_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_SATELLITE_AGE_MS = 60 * 60 * 1000;
 const MIDDAY_SATELLITE_AGE_MS = 30 * 60 * 1000;
 // NZ hours, 10am up to 4pm.
 const MIDDAY = { from: 10, to: 16 };
-// Himawari readings arrive about half an hour after they're taken.
-const SATELLITE_DELAY_MS = 60 * 60 * 1000;
 // Keeps request URLs to a sensible length.
 const LOCATIONS_PER_REQUEST = 100;
 // Bumped when what's cached changes shape, so older copies are fetched again.
@@ -189,13 +190,29 @@ export async function cachedWeather(
 }
 
 // Whether a past day's weather can't change any more: the forecast was
-// fetched after the day was over, and the satellite after its last sunlight
-// had arrived.
+// fetched after the day was over, and the satellite once its readings ran
+// past the day's last sunlight.
 export function weatherIsFinal(forecast: Forecast, satellite: SatelliteDay | null): boolean {
 	const sunlit = sunlitTimes(forecast);
 	if (nzDate(new Date(forecast.fetchedAt)) <= forecast.date) return false;
 	if (sunlit.length === 0) return true;
-	return satellite !== null && Date.parse(satellite.fetchedAt) >= sunlit[sunlit.length - 1] + SATELLITE_DELAY_MS;
+	return satellite !== null && satelliteIsFinal(satellite, sunlit);
+}
+
+// Whether a day's satellite readings run past its last sunlight, however
+// long after it they arrived.
+function satelliteIsFinal(satellite: SatelliteDay, sunlit: number[]): boolean {
+	const newest = newestReading(satellite);
+	return newest !== null && newest > sunlit[sunlit.length - 1];
+}
+
+// When a day's newest satellite reading was taken, if it has any.
+function newestReading({ times, locations }: SatelliteDay): number | null {
+	const readings = Object.values(locations);
+	for (let i = times.length - 1; i >= 0; i--) {
+		if (readings.some((location) => location.ghiWm2[i] !== null)) return times[i];
+	}
+	return null;
 }
 
 // Whether a day's weather was taken where each location's is taken now (see
@@ -270,12 +287,13 @@ async function getSatellite(
 		.first<string>("data");
 	const previous = current<SatelliteDay>(cached);
 	if (previous && takenAt(previous.pixels, locations, satellitePixels)) {
-		const fetchedAt = Date.parse(previous.fetchedAt);
-		// Fetched after the day's last sunlight had arrived, it's final.
-		const final = fetchedAt >= sunlit[sunlit.length - 1] + SATELLITE_DELAY_MS;
+		if (satelliteIsFinal(previous, sunlit)) return previous;
 		const hour = nzHour(now);
 		const maxAge = hour >= MIDDAY.from && hour < MIDDAY.to ? MIDDAY_SATELLITE_AGE_MS : MAX_SATELLITE_AGE_MS;
-		if (final || now.getTime() - fetchedAt < maxAge) return previous;
+		if (now.getTime() - Date.parse(previous.fetchedAt) < maxAge) return previous;
+		// Until Open-Meteo has something newer it's asked again every run, so
+		// readings that arrive late are picked up within 10 minutes.
+		if (!(await hasNewerReadings(previous, locations, date, now))) return previous;
 	}
 
 	try {
@@ -441,6 +459,26 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 		[date, now.toISOString().slice(0, 10)].sort()[0],
 	);
 	return satelliteDay(readings, locations, date, now);
+}
+
+// Whether Open-Meteo has readings of a day newer than a cached copy's newest,
+// going by the largest GXP's most-populated pixel: one call, where refetching
+// every pixel is ~310. If it can't tell, it's taken to have none.
+async function hasNewerReadings(
+	cached: SatelliteDay,
+	locations: WeatherLocation[],
+	date: string,
+	now: Date,
+): Promise<boolean> {
+	const probe = { ...locations[0], pixels: locations[0].pixels.slice(0, 1) };
+	try {
+		const latest = newestReading(await fetchSatellite([probe], date, now));
+		const newest = newestReading(cached);
+		return latest !== null && (newest === null || latest > newest);
+	} catch (error) {
+		console.warn(`Couldn't check for new satellite irradiance for ${date}: ${(error as Error).message}`);
+		return false;
+	}
 }
 
 // Each of the locations' pixels' readings over whole UTC days, by where it is.

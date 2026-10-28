@@ -298,7 +298,7 @@ describe("runAggregateJob", () => {
 	it("estimates yesterday from the production job's weather, again whenever it's refreshed", async () => {
 		// Just after midnight, when the last of yesterday's satellite readings
 		// (Islington's sun never sets here) haven't arrived.
-		const midnight = Date.parse("2026-10-26T00:20:00+13:00");
+		const midnight = Date.parse("2026-10-26T00:10:00+13:00");
 		vi.setSystemTime(midnight);
 		mockOpenMeteo();
 		await runProductionJob(env, new Date());
