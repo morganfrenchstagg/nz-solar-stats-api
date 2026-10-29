@@ -17,12 +17,20 @@ import {
 } from "./endpoints/solarEnergy";
 import { SolarProductionForDate, SolarProductionToday } from "./endpoints/solarProduction";
 import { runProductionJob } from "./production/job";
+import { CRONS } from "./schedule";
 
 // Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
 
 // Any site can read the API from a browser, but not write to it.
 app.use("*", cors({ origin: "*", allowMethods: ["GET", "HEAD", "OPTIONS"] }));
+
+// Errors aren't cached: a day or period missing now can be stored by the next
+// run. Endpoints say how long what they return can be (see cacheUntilStale).
+app.use("*", async (c, next) => {
+	await next();
+	if (!c.res.ok) c.header("Cache-Control", "no-store");
+});
 
 app.onError((err, c) => {
 	if (err instanceof ApiException) {
@@ -78,19 +86,19 @@ export default {
 	// The crons are wrangler.jsonc's.
 	async scheduled(controller, env) {
 		switch (controller.cron) {
-			case "0 18 * * *":
+			case CRONS.capacity:
 				await runCapacityJob(env);
 				break;
-			case "*/10 * * * *":
+			case CRONS.production:
 				// As at the time it was due rather than when it started, a few
 				// seconds late, so weather that's refreshed every half hour is
 				// refreshed on the half hour and not one run later.
 				await runProductionJob(env, new Date(controller.scheduledTime));
 				break;
-			case "5,15,25,35,45,55 * * * *":
+			case CRONS.aggregate:
 				await runAggregateJob(env, new Date(controller.scheduledTime));
 				break;
-			case "35 10,14 * * *":
+			case CRONS.weatherArchive:
 				await runWeatherArchiveJob(env, new Date(controller.scheduledTime));
 				break;
 			default:

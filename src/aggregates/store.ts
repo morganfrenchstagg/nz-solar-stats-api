@@ -10,6 +10,20 @@ export function energyKey(resolution: EnergyResolution, period: string): string 
 	return resolution === "annual" ? "aggregates/annual.json" : `aggregates/${resolution}/${period}.json`;
 }
 
+// The period of the file a day's energy is in, at a resolution.
+export function energyPeriod(resolution: EnergyResolution, date: string): string {
+	switch (resolution) {
+		case "daily":
+			return date.slice(0, 7);
+		case "weekly":
+			return isoWeek(date).year;
+		case "monthly":
+			return date.slice(0, 4);
+		case "annual":
+			return "all";
+	}
+}
+
 // A day's estimate every 10 minutes, in the same form as the production job's.
 export function tenMinuteKey(date: string): string {
 	return `aggregates/10-minute/${date}.json`;

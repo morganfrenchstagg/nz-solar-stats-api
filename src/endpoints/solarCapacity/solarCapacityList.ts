@@ -1,6 +1,7 @@
 import { contentJson, NotFoundException, OpenAPIRoute } from "chanfana";
 import { z } from "zod";
 import { AppContext } from "../../types";
+import { cacheUntilStale } from "../cacheControl";
 import { type Capacity, capacity, capacityColumns } from "./base";
 
 const gxpCapacity = capacity.extend({
@@ -54,6 +55,7 @@ export class SolarCapacityList extends OpenAPIRoute {
 			throw new NotFoundException("No solar capacity for that month");
 		}
 
+		cacheUntilStale(c, "capacity");
 		return {
 			success: true,
 			result: {

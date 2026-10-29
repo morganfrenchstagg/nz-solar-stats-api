@@ -9,7 +9,7 @@ const NOW = Date.parse("2026-10-26T01:00:00Z");
 async function getProduction(path = "") {
 	const response = await SELF.fetch(`http://local.test/solar-production${path}`);
 	const body = await response.json<{ success: boolean; result: any; errors?: { message: string }[] }>();
-	return { status: response.status, body };
+	return { status: response.status, body, cacheControl: response.headers.get("Cache-Control") };
 }
 
 // Cut down to what tells the days apart; the job's tests cover what's in them.
@@ -94,5 +94,27 @@ describe("GET /solar-production[/{date}]", () => {
 	it.each(["/tomorrow", "/26-10-2026", "/2026-13-01"])("rejects %s as a date", async (path) => {
 		const { status } = await getProduction(path);
 		expect(status).toBe(400);
+	});
+
+	it.each(["", "/today", "/yesterday", "/2026-10-25"])(
+		"caches %s until the production job's next run has stored it again",
+		async (path) => {
+			vi.setSystemTime(Date.parse("2026-10-26T01:03:00Z"));
+			// Its 01:10 UTC run, allowed two minutes.
+			expect((await getProduction(path)).cacheControl).toBe("public, max-age=540");
+		},
+	);
+
+	it("caches days before yesterday until the weather archive job could bring them new weather", async () => {
+		await env.DATASET.put(tenMinuteKey("2016-01-01"), JSON.stringify(estimateFor("2016-01-01")));
+		// Its 10:35 UTC run, allowing for the aggregate job's run after.
+		for (const path of ["/2026-10-20", "/2016-01-01"]) {
+			expect((await getProduction(path)).cacheControl).toBe("public, max-age=35700");
+		}
+	});
+
+	it("doesn't cache a day it has no estimate for, or a bad date", async () => {
+		expect((await getProduction("/2026-10-30")).cacheControl).toBe("no-store");
+		expect((await getProduction("/tomorrow")).cacheControl).toBe("no-store");
 	});
 });
