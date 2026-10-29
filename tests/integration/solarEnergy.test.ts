@@ -9,7 +9,7 @@ const NOW = Date.parse("2026-10-26T01:00:00Z");
 async function getEnergy(path: string) {
 	const response = await SELF.fetch(`http://local.test/solar-energy${path}`);
 	const body = await response.json<{ success: boolean; result: any; errors?: { message: string }[] }>();
-	return { status: response.status, body };
+	return { status: response.status, body, cacheControl: response.headers.get("Cache-Control") };
 }
 
 const day = (from: string, gxps: Record<string, number>) => ({
@@ -68,6 +68,43 @@ describe("GET /solar-energy/...", () => {
 	it.each(["/daily/2026-13", "/daily/2026", "/monthly/26", "/weekly/2026-10"])("rejects %s", async (path) => {
 		expect((await getEnergy(path)).status).toBe(400);
 	});
+
+	it.each(["/daily/2026-10", "/weekly/2026", "/monthly/2026", "/annual"])(
+		"caches %s, which has yesterday in it, for an hour and then until the aggregate job's next run",
+		async (path) => {
+			await env.DATASET.put(energyKey("weekly", "2026"), JSON.stringify({ data: [] }));
+			await env.DATASET.put(energyKey("monthly", "2026"), JSON.stringify({ data: [] }));
+			// Its 02:05 UTC run, allowed two minutes.
+			expect((await getEnergy(path)).cacheControl).toBe("public, max-age=4020");
+		},
+	);
+
+	it.each(["/daily/2026-09", "/weekly/2025", "/monthly/2025"])(
+		"caches %s, which ended before yesterday, until the weather archive job could change it",
+		async (path) => {
+			await env.DATASET.put(energyKey("daily", "2026-09"), JSON.stringify({ data: [] }));
+			await env.DATASET.put(energyKey("weekly", "2025"), JSON.stringify({ data: [] }));
+			await env.DATASET.put(energyKey("monthly", "2025"), JSON.stringify({ data: [] }));
+			// Its 10:35 UTC run, allowing for the aggregate job's run after.
+			expect((await getEnergy(path)).cacheControl).toBe("public, max-age=35700");
+		},
+	);
+
+	it("keeps a month live until yesterday's left it", async () => {
+		// Just after midnight on 1 November in NZ: October's last day is yet to
+		// be estimated.
+		vi.setSystemTime(Date.parse("2026-10-31T11:02:00Z"));
+		// To the aggregate job's 12:05 UTC run, allowed two minutes.
+		expect((await getEnergy("/daily/2026-10")).cacheControl).toBe("public, max-age=3900");
+		// A day later, it waits for the archive job's 14:35 UTC run.
+		vi.setSystemTime(Date.parse("2026-11-01T11:02:00Z"));
+		expect((await getEnergy("/daily/2026-10")).cacheControl).toBe("public, max-age=13980");
+	});
+
+	it("doesn't cache a period with nothing estimated, or a bad one", async () => {
+		expect((await getEnergy("/weekly/2025")).cacheControl).toBe("no-store");
+		expect((await getEnergy("/daily/2026-13")).cacheControl).toBe("no-store");
+	});
 });
 
 describe("GET /solar-energy", () => {
@@ -98,9 +135,11 @@ describe("GET /solar-energy", () => {
 	});
 
 	it("says how far the backfill has got", async () => {
-		const { status, body } = await getEnergy("");
+		const { status, body, cacheControl } = await getEnergy("");
 
 		expect(status).toBe(200);
+		// Until the aggregate job's 01:05 UTC run, allowed two minutes.
+		expect(cacheControl).toBe("public, max-age=420");
 		expect(body.result).toEqual({
 			backfillFrom: "2026-09-30",
 			estimatedFrom: "2026-10-23",

@@ -47,6 +47,15 @@ Endpoints:
 - `GET /solar-energy/daily/{YYYY-MM}`, `/solar-energy/weekly/{YYYY}`, `/solar-energy/monthly/{YYYY}`, `/solar-energy/annual`: estimated energy at every GXP, in MWh, for each day of a month, ISO week (Monday to Sunday) of a year, month of a year, or year
 - `GET /solar-energy`: how far the backfill has got, and how many days are being estimated again
 
+Each response can be cached (`Cache-Control: public, max-age=…`) until the job that stores its data is next due, allowing the job a few minutes to run (`src/endpoints/cacheControl.ts`, from the crons in `src/schedule.ts`):
+
+- Today's and yesterday's estimates: until two minutes after the production job's next run. `/solar-energy`: two minutes after the aggregate job's.
+- Energy in periods with yesterday in them (the current month, week or year, and `/annual`): an hour, then until two minutes after the aggregate job's next run, so 60–70 minutes.
+- Capacities: until 10 minutes after the capacity job's next daily run at 18:00 UTC.
+- Days before yesterday, and energy in periods that ended before it: until the weather archive job (10:35 and 14:35 UTC) or the capacity job could have changed them, 20 minutes after either to allow for the aggregate job's run after it. That's up to about 16½ hours. A deploy that changes the model has them estimated again unannounced, so they can be that out of date while it does.
+
+Errors aren't cached (`no-store`): a day or period missing now can be stored by the next run.
+
 ## Solar production job
 
 A second cron trigger, every 10 minutes, estimates yesterday's and today's solar output (`src/production/job.ts`) and stores each NZ date as one JSON file in the `nz-solar-stats-dataset` R2 bucket (binding `DATASET`), at `solar-production/YYYY-MM-DD.json`, replacing the last. The `/solar-production` endpoints only read these files, so a request never calls Open-Meteo or works anything out. Today's file has live values as at the run, which is its `time`. Yesterday's is redone through the day after, so it ends up with the satellite's last readings and the forecast fetched once the day was over; older days are kept as they were, building up a history from when the job started. Future days aren't estimated.

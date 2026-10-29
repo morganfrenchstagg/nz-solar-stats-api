@@ -16,8 +16,9 @@
 		// after each of those, estimating past days again where anything's
 		// changed and adding them up into energy; and twice a day (NZ night,
 		// when the production job asks Open-Meteo for least), fetching a
-		// fortnight of past weather to backfill from. src/index.ts tells them
-		// apart by these strings.
+		// fortnight of past weather to backfill from. src/schedule.ts has the
+		// same strings, to tell them apart by and to cache responses until the
+		// next one storing their data.
 		"crons": ["0 18 * * *", "*/10 * * * *", "5,15,25,35,45,55 * * * *", "35 10,14 * * *"]
 	},
 	"d1_databases": [

@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("Solar capacity API", () => {
 	beforeEach(async () => {
@@ -89,6 +89,27 @@ describe("Solar capacity API", () => {
 		it("returns 404 for a GXP with no solar data", async () => {
 			const response = await SELF.fetch("http://local.test/solar-capacity/XYZ");
 			expect(response.status).toBe(404);
+		});
+	});
+
+	describe("caching", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it.each(["", "?month=2026-06", "/ISL"])("caches /solar-capacity%s until the capacity job's next run", async (path) => {
+			vi.useFakeTimers({ toFake: ["Date"] });
+			// Five minutes after its 18:00 UTC run, allowed ten to store what it found.
+			vi.setSystemTime(Date.parse("2026-10-26T18:05:00Z"));
+			const response = await SELF.fetch(`http://local.test/solar-capacity${path}`);
+
+			expect(response.status).toBe(200);
+			expect(response.headers.get("Cache-Control")).toBe("public, max-age=300");
+		});
+
+		it.each(["?month=2030-01", "?month=July", "/XYZ"])("doesn't cache /solar-capacity%s, an error", async (path) => {
+			const response = await SELF.fetch(`http://local.test/solar-capacity${path}`);
+			expect(response.headers.get("Cache-Control")).toBe("no-store");
 		});
 	});
 });

@@ -4,6 +4,7 @@ import { tenMinuteKey } from "../aggregates/store";
 import { estimateKey } from "../production/job";
 import { nzDate, previousDate } from "../production/weather";
 import { AppContext } from "../types";
+import { cacheUntilStale } from "./cacheControl";
 
 const production = z.object({
 	distributedMw: z
@@ -72,7 +73,7 @@ export class SolarProductionToday extends OpenAPIRoute {
 	};
 
 	public async handle(c: AppContext) {
-		return storedEstimate(c.env.DATASET, "today");
+		return storedEstimate(c, "today");
 	}
 }
 
@@ -94,21 +95,26 @@ export class SolarProductionForDate extends OpenAPIRoute {
 
 	public async handle(c: AppContext) {
 		const data = await this.getValidatedData<typeof this.schema>();
-		return storedEstimate(c.env.DATASET, data.params.date);
+		return storedEstimate(c, data.params.date);
 	}
 }
 
 // The day's estimate as the production job last stored it, or for a day
 // it's done with, as the aggregate job did: that's estimated again whenever
 // the model changes, and goes back before the production job started.
-async function storedEstimate(bucket: R2Bucket, requested: string) {
-	const today = nzDate(new Date());
+async function storedEstimate(c: AppContext, requested: string) {
+	const now = new Date();
+	const today = nzDate(now);
 	const yesterday = previousDate(today);
 	const date = requested === "today" ? today : requested === "yesterday" ? yesterday : requested;
-	const keys = date >= yesterday ? [estimateKey(date), tenMinuteKey(date)] : [tenMinuteKey(date), estimateKey(date)];
+	const live = date >= yesterday;
+	const keys = live ? [estimateKey(date), tenMinuteKey(date)] : [tenMinuteKey(date), estimateKey(date)];
 	for (const key of keys) {
-		const stored = await bucket.get(key);
-		if (stored) return { success: true, result: await stored.json() };
+		const stored = await c.env.DATASET.get(key);
+		if (stored) {
+			cacheUntilStale(c, live ? "production" : "history", now);
+			return { success: true, result: await stored.json() };
+		}
 	}
 	throw new NotFoundException(`No estimate for ${date}`);
 }
