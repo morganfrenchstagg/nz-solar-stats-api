@@ -81,10 +81,10 @@ Weather is taken where each GXP's customers live, not at its substation, which c
 
 Sunlight (global horizontal, direct normal and diffuse) comes from two [Open-Meteo](https://open-meteo.com/) sources (`src/production/blend.ts`), each component blended separately:
 
-- For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, usually about half an hour behind (some days Open-Meteo falls hours behind). GXPs of 5 MW or more average their five most-populated pixels, weighted by population; smaller ones use their most-populated pixel.
+- For times that have already happened, Himawari-9 satellite readings: every 10 minutes on a ~5 km grid, usually about half an hour behind (some days Open-Meteo falls hours behind). GXPs of 5 MW or more average their five most-populated pixels, weighted by population; smaller ones use their most-populated pixel. Each reading is then averaged with those up to 20 minutes either side, weighted 1, 2, 3, 2, 1, since a GXP's rooftops are spread over a district and its output changes more gently than the cloud over a few pixels. Against 5-minute grid load at the 25 GXPs where solar is biggest (January to September 2026), this improved the fit at all 25, and the share of the estimate's 10-minute swings that showed up in the load went from 18% to 59%. The latest reading, with nothing after it yet, is averaged with those before it.
 - After the latest reading, the forecast. How cloudy the last reading was compared with the forecast fades out over two hours, so the two don't jump apart.
 
-The estimate runs every 10 minutes, the satellite's own interval, so its readings are used as they are. Finer would only be interpolation. Open-Meteo's forecast is hourly underneath (it only has true 15-minute data for Europe and North America, interpolating elsewhere), so after the latest reading the profile is smooth between hours.
+The estimate runs every 10 minutes, the satellite's own interval, so its readings aren't interpolated. Finer would only be interpolation. Open-Meteo's forecast is hourly underneath (it only has true 15-minute data for Europe and North America, interpolating elsewhere), so after the latest reading the profile is smooth between hours.
 
 The forecast, and temperature, are taken at the GXP's population centre. If the satellite fails, the estimate falls back to the forecast.
 

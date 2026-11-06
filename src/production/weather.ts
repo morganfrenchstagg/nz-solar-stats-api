@@ -1,4 +1,4 @@
-import { averagePixels, blendIrradiance, resample, stepsThrough, type WeatherPoints } from "./blend";
+import { averagePixels, blendIrradiance, resample, smoothReadings, stepsThrough, type WeatherPoints } from "./blend";
 
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archive";
@@ -158,7 +158,8 @@ export function blendWeather(
 			const readings = satellite?.locations[id];
 			if (!readings) return [id, location];
 			for (const component of COMPONENTS) {
-				const blend = blendIrradiance(satellite.times, readings[component], times, location[component]);
+				const smoothed = smoothReadings(satellite.times, readings[component]);
+				const blend = blendIrradiance(satellite.times, smoothed, times, location[component]);
 				location[component] = blend.irradianceWm2;
 				if (blend.observedUntil !== null) observedUntil = Math.max(observedUntil ?? 0, blend.observedUntil);
 			}

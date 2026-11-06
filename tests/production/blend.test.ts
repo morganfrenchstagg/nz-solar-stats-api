@@ -5,6 +5,7 @@ import {
 	BRIDGE_MS,
 	pixelsAround,
 	resample,
+	smoothReadings,
 	stepsThrough,
 	weatherPoints,
 } from "../../src/production/blend";
@@ -74,6 +75,29 @@ describe("averagePixels", () => {
 
 	it("weights pixels by their share of the people", () => {
 		expect(averagePixels([[100, 100], [400, null]], [3, 1])).toEqual([175, 100]);
+	});
+});
+
+describe("smoothReadings", () => {
+	const times = Array.from({ length: 7 }, (_, i) => i * 10 * MINUTE);
+
+	it("spreads a reading over the 20 minutes either side, weighted 1, 2, 3, 2, 1", () => {
+		const longer = Array.from({ length: 9 }, (_, i) => i * 10 * MINUTE);
+		expect(smoothReadings(longer, [0, 0, 0, 0, 900, 0, 0, 0, 0])).toEqual([0, 0, 100, 200, 300, 200, 100, 0, 0]);
+	});
+
+	it("leaves a steady ramp as it is", () => {
+		expect(smoothReadings(times, [0, 100, 200, 300, 400, 500, 600]).slice(2, 5)).toEqual([200, 300, 400]);
+	});
+
+	it("keeps missing readings missing and skips them in the average", () => {
+		expect(smoothReadings(times, [300, null, 300, 300, 300, null, null])).toEqual([300, null, 300, 300, 300, null, null]);
+	});
+
+	it("averages the latest reading with earlier ones only", () => {
+		const smoothed = smoothReadings(times, [100, 200, 300, null, null, null, null]);
+		// (300 × 3 + 200 × 2 + 100) / 6
+		expect(smoothed[2]).toBeCloseTo(1400 / 6);
 	});
 });
 
