@@ -3,6 +3,7 @@ import {
 	averagePixels,
 	blendIrradiance,
 	resample,
+	smoothReadings,
 	STEP_MS,
 	stepsThrough,
 	type WeatherPoints,
@@ -77,9 +78,12 @@ export async function fetchWeather(
 		const blend = (variable: string, fallback: number[]) =>
 			blendIrradiance(
 				satelliteTimes,
-				averagePixels(
-					pixels.map((pixel) => pixel[variable]),
-					points.pixels.map((pixel) => pixel.weight),
+				smoothReadings(
+					satelliteTimes,
+					averagePixels(
+						pixels.map((pixel) => pixel[variable]),
+						points.pixels.map((pixel) => pixel.weight),
+					),
 				),
 				times,
 				fallback,
