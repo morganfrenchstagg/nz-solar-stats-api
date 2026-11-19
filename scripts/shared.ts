@@ -109,11 +109,13 @@ const SKY_VARIABLES = [
 // One series per point. Open-Meteo sometimes sends a past day as all nulls,
 // then has it moments later, so a mostly-null response is retried. The
 // satellite's occasional missing reading is fine: the blend bridges it.
-async function getSeries(
+export async function getSeries(
 	url: string,
 	key: "minutely_15" | "hourly",
 	points: { lat: number; long: number }[],
 	params: Record<string, string>,
+	// The forecast should have no gaps at all.
+	maxMissing = key === "minutely_15" ? 0 : 0.5,
 ): Promise<Series[]> {
 	const query = new URLSearchParams({
 		latitude: points.map((point) => point.lat.toFixed(4)).join(","),
@@ -128,8 +130,7 @@ async function getSeries(
 		const series = (Array.isArray(body) ? body : [body]).map((point) => point[key] as Series);
 		const values = series.flatMap(({ time, ...rest }) => Object.values(rest).flat());
 		const missing = values.filter((value) => value === null).length / values.length;
-		// The forecast should have no gaps at all.
-		if (missing <= (key === "minutely_15" ? 0 : 0.5)) return series;
+		if (missing <= maxMissing) return series;
 		if (attempt === 4) throw new Error("Open-Meteo kept sending gaps; try again later");
 		await new Promise((resolve) => setTimeout(resolve, 10_000));
 	}
@@ -165,16 +166,33 @@ export function clearnessIndex(weather: Weather, date: string): number {
 	return ground / topOfAtmosphere;
 }
 
-// The UTC instant of midnight at the start of an NZ date. Daylight saving
-// changes at 2–3am, so the offset an hour either side of midnight is right.
+// The UTC instant of midnight at the start of an NZ date.
 export function nzMidnight(date: string): number {
-	const utcMidnight = Date.parse(`${date}T00:00:00Z`);
-	const offset = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Auckland", timeZoneName: "longOffset" })
-		.formatToParts(utcMidnight - 12 * 60 * 60 * 1000)
+	return nzInstant(`${date}T00:00:00`);
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const offsetFormat = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Auckland", timeZoneName: "longOffset" });
+
+// The UTC instant of an NZ clock time (YYYY-MM-DDTHH:MM:SS): whichever of
+// NZDT (+13) and NZST (+12) was in force then. In the hour repeated when
+// daylight saving ends, the first; in the hour skipped when it starts, the
+// clock time an hour on.
+export function nzInstant(clock: string): number {
+	const asUtc = Date.parse(`${clock}Z`);
+	for (const hours of [13, 12]) {
+		const instant = asUtc - hours * HOUR_MS;
+		if (nzOffsetMs(instant) === hours * HOUR_MS) return instant;
+	}
+	return asUtc - 12 * HOUR_MS;
+}
+
+function nzOffsetMs(instant: number): number {
+	const offset = offsetFormat
+		.formatToParts(instant)
 		.find((part) => part.type === "timeZoneName")!
 		.value.match(/GMT([+-])(\d{2}):(\d{2})/)!;
-	const offsetMs = (Number(offset[2]) * 60 + Number(offset[3])) * 60 * 1000 * (offset[1] === "-" ? -1 : 1);
-	return utcMidnight - offsetMs;
+	return (Number(offset[2]) * 60 + Number(offset[3])) * 60 * 1000 * (offset[1] === "-" ? -1 : 1);
 }
 
 export function nzDate(instant: number): string {
