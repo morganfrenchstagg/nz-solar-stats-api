@@ -109,13 +109,19 @@ function callsTo(fetch: ReturnType<typeof mockOpenMeteo>, hostname: string) {
 }
 
 // Satellite requests for every pixel, and those for one, checking for newer readings.
+const pixelCount = (input: unknown) => new URL(String(input)).searchParams.get("latitude")!.split(",").length;
 function satelliteCalls(fetch: ReturnType<typeof mockOpenMeteo>) {
-	const pixels = (input: unknown) => new URL(String(input)).searchParams.get("latitude")!.split(",").length;
 	const calls = callsTo(fetch, SATELLITE);
 	return {
-		fetches: calls.filter(([input]) => pixels(input) > 1).length,
-		checks: calls.filter(([input]) => pixels(input) === 1).length,
+		fetches: calls.filter(([input]) => pixelCount(input) > 1).length,
+		checks: calls.filter(([input]) => pixelCount(input) === 1).length,
 	};
+}
+
+// The first request for every pixel's readings.
+function pixelFetch(fetch: ReturnType<typeof mockOpenMeteo>): URLSearchParams {
+	const [input] = callsTo(fetch, SATELLITE).find(([input]) => pixelCount(input) > 1)!;
+	return new URL(String(input)).searchParams;
 }
 
 // A day's estimate, made at the mocked time, today's by default.
@@ -248,7 +254,8 @@ describe("estimateDay", () => {
 		expect(await observedUntilAt("12:00")).toBe("2026-10-25T22:30:00.000Z");
 		expect(await observedUntilAt("12:30")).toBe("2026-10-25T22:30:00.000Z");
 		expect(await observedUntilAt("12:40")).toBe("2026-10-25T22:30:00.000Z");
-		expect(satelliteCalls(fetch)).toEqual({ fetches: 1, checks: 2 });
+		// One check first, as nothing was cached.
+		expect(satelliteCalls(fetch)).toEqual({ fetches: 1, checks: 3 });
 
 		// Its readings since arrive all at once, and are fetched at the next run.
 		vi.restoreAllMocks();
@@ -258,13 +265,32 @@ describe("estimateDay", () => {
 		expect(satelliteCalls(caughtUp)).toEqual({ fetches: 1, checks: 1 });
 	});
 
+	it("checks one pixel rather than fetching every one until the day has any readings", async () => {
+		// Himawari is down, with nothing since the day before yesterday.
+		const fetch = mockOpenMeteo({ satelliteUntil: Date.parse("2026-10-24T12:00:00+13:00") });
+		const observedUntilAt = async (clock: string) => {
+			vi.setSystemTime(Date.parse(`2026-10-26T${clock}:00+13:00`));
+			return (await estimate()).observedUntil;
+		};
+
+		expect(await observedUntilAt("12:00")).toBeNull();
+		expect(await observedUntilAt("12:10")).toBeNull();
+		expect(await observedUntilAt("12:20")).toBeNull();
+		expect(satelliteCalls(fetch)).toEqual({ fetches: 0, checks: 3 });
+
+		vi.restoreAllMocks();
+		const back = mockOpenMeteo();
+		expect(await observedUntilAt("12:30")).toBe("2026-10-25T23:00:00.000Z");
+		expect(satelliteCalls(back)).toEqual({ fetches: 1, checks: 1 });
+	});
+
 	it("refreshes a past day's satellite until its readings run past the last sunlight, however late they arrive", async () => {
 		// Islington's sun never sets here, and Open-Meteo has nothing after 10pm.
 		const fetch = mockOpenMeteo({ satelliteUntil: Date.parse("2026-10-25T22:00:00+13:00") });
 		expect((await estimate("2026-10-25")).observedUntil).toBe("2026-10-25T09:00:00.000Z");
 		vi.setSystemTime(NOW + 30 * MINUTE);
 		await estimate("2026-10-25");
-		expect(satelliteCalls(fetch)).toEqual({ fetches: 1, checks: 1 });
+		expect(satelliteCalls(fetch)).toEqual({ fetches: 1, checks: 2 });
 
 		vi.restoreAllMocks();
 		const caughtUp = mockOpenMeteo();
@@ -322,7 +348,7 @@ describe("estimateDay", () => {
 		const fetch = mockOpenMeteo();
 		await estimate();
 
-		const latitudes = new URL(String(callsTo(fetch, SATELLITE)[0][0])).searchParams.get("latitude")!.split(",");
+		const latitudes = pixelFetch(fetch).get("latitude")!.split(",");
 		expect(latitudes).toEqual(
 			[...gxpLocations.gxps.ISL.pixels, ...gxpLocations.gxps.ASB.pixels].map(([lat]) => lat.toFixed(4)),
 		);
@@ -346,14 +372,14 @@ describe("estimateDay", () => {
 		const fetch = mockOpenMeteo({ satelliteAt: (lat, long) => (`${lat},${long}` === "-43.4750,172.6250" ? 1000 : 0) });
 		const result = await estimate();
 
-		const params = new URL(String(callsTo(fetch, SATELLITE)[0][0])).searchParams;
+		const params = pixelFetch(fetch);
 		const longs = params.get("longitude")!.split(",");
 		const asked = params.get("latitude")!.split(",").map((lat, i) => `${lat},${longs[i]}`);
 		const locations: Record<string, { pixels: number[][] }> = gxpLocations.gxps;
 		const wanted = ["ISL", "ASB", "BRY", "KAI"].flatMap((gxp) =>
 			locations[gxp].pixels.map(([lat, long]) => `${lat.toFixed(4)},${long.toFixed(4)}`),
 		);
-		expect(callsTo(fetch, SATELLITE)).toHaveLength(1);
+		expect(satelliteCalls(fetch).fetches).toBe(1);
 		expect(asked).toHaveLength(19);
 		expect(new Set(asked)).toEqual(new Set(wanted));
 
@@ -395,7 +421,7 @@ describe("estimateDay", () => {
 		vi.setSystemTime(NOW + 5 * 60 * MINUTE);
 		const result = await estimate("2026-10-20");
 
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([1, 1]);
+		expect([callsTo(fetch, FORECAST).length, satelliteCalls(fetch).fetches]).toEqual([1, 1]);
 		expect(result).toMatchObject({
 			date: "2026-10-20",
 			observedUntil: "2026-10-20T10:50:00.000Z",
@@ -412,11 +438,11 @@ describe("estimateDay", () => {
 			env.DB.prepare("UPDATE satellite_irradiance SET data = json_set(data, '$.pixels.ISL', '-43.5000,172.5000,1')"),
 		]);
 		await estimate("2026-10-20");
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 2]);
+		expect([callsTo(fetch, FORECAST).length, satelliteCalls(fetch).fetches]).toEqual([2, 2]);
 
 		// Taken in the right places again, it's kept for good.
 		await estimate("2026-10-20");
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 2]);
+		expect([callsTo(fetch, FORECAST).length, satelliteCalls(fetch).fetches]).toEqual([2, 2]);
 	});
 
 	it("refetches weather cached before it recorded where it was taken", async () => {
@@ -427,7 +453,7 @@ describe("estimateDay", () => {
 			env.DB.prepare("UPDATE satellite_irradiance SET data = json_remove(data, '$.pixels')"),
 		]);
 		await estimate("2026-10-20");
-		expect([callsTo(fetch, FORECAST).length, callsTo(fetch, SATELLITE).length]).toEqual([2, 2]);
+		expect([callsTo(fetch, FORECAST).length, satelliteCalls(fetch).fetches]).toEqual([2, 2]);
 	});
 
 	it("keeps a day's forecast from a GXP's old points once Open-Meteo no longer has the day", async () => {
@@ -540,6 +566,19 @@ describe("estimateDay", () => {
 		mockOpenMeteo();
 		const retry = await estimate("2026-10-20");
 		expect(retry.total.profileMw[0]).toBeGreaterThan(0);
+	});
+
+	it("keeps the last forecast when refreshing it fails", async () => {
+		mockOpenMeteo();
+		const before = await estimate();
+		vi.restoreAllMocks();
+		const fetch = mockOpenMeteo({ status: 429 });
+		vi.setSystemTime(NOW + 181 * MINUTE);
+		const result = await estimate();
+
+		expect(callsTo(fetch, FORECAST)).toHaveLength(1);
+		expect(result.weatherFetchedAt).toBe(before.weatherFetchedAt);
+		expect(result.total.profileMw).toEqual(before.total.profileMw);
 	});
 
 	it("fails when Open-Meteo does", async () => {

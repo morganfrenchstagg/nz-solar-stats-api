@@ -9,13 +9,14 @@ const OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive";
 export const ARCHIVE_MODEL = "era5_seamless";
 // Every location (and satellite pixel) counts against Open-Meteo's 10,000
 // free calls a day. The forecast for all GXPs is refreshed at most every three
-// hours (125 × 8 calls), and the satellite's ~310 pixels at most every half
+// hours (125 × 8 calls), and the satellite's ~320 pixels at most every half
 // hour from 10am to 4pm, when most of the day's sunlight falls, and hourly
-// otherwise while the sun's up (about 310 × 25 on December's long days), so a
-// day of the production job stays under 9,000. Himawari readings usually
-// reach Open-Meteo half an hour after they're taken, but some days hours
-// after, so the pixels are only refetched once one of them has newer
-// readings (see hasNewerReadings). A day that's over doesn't change, so its
+// otherwise while the sun's up (about 320 × 25 on December's long days), so a
+// day of the production job stays under 9,000, leaving the weather archive
+// job its ~900. Himawari readings usually reach Open-Meteo half an hour after
+// they're taken, but some days hours after (or not at all, when it's down),
+// so the pixels are only fetched once one of them has newer readings than
+// are cached, or any at all (see hasNewerReadings). A day that's over doesn't change, so its
 // weather is kept for good, unless a GXP's points have moved since (see
 // gxpWeatherPoints).
 const MAX_FORECAST_AGE_MS = 3 * 60 * 60 * 1000;
@@ -41,6 +42,7 @@ export class WeatherUnavailableError extends Error {}
 // Open-Meteo failed, or sent weather with gaps. Worth retrying, never caching:
 // a past day's weather is kept for good.
 export class WeatherFetchError extends Error {}
+const NO_READINGS = "every reading was empty";
 
 // A GXP and the points its weather is taken at (see gxpWeatherPoints).
 export interface WeatherLocation extends WeatherPoints {
@@ -262,6 +264,12 @@ async function getForecast(
 		if (error instanceof WeatherUnavailableError && previous && hasEvery(previous.locations, locations)) {
 			return previous;
 		}
+		// A refresh that fails (Open-Meteo's rate limit, say) leaves the last
+		// forecast standing, and it's asked for again next run.
+		if (error instanceof WeatherFetchError && previous && takenAt(previous.points, locations, forecastPoint)) {
+			console.warn(`Keeping the forecast for ${date} from ${previous.fetchedAt}: ${error.message}`);
+			return previous;
+		}
 		throw error;
 	}
 	await db
@@ -296,7 +304,12 @@ async function getSatellite(
 		if (now.getTime() - Date.parse(previous.fetchedAt) < maxAge) return previous;
 		// Until Open-Meteo has something newer it's asked again every run, so
 		// readings that arrive late are picked up within 10 minutes.
-		if (!(await hasNewerReadings(previous, locations, date, now))) return previous;
+		if (!(await hasNewerReadings(newestReading(previous), locations, date, now))) return previous;
+	} else if (!previous && !(await hasNewerReadings(null, locations, date, now))) {
+		// Nothing is cached until a reading arrives, so without this every run
+		// before then (at dawn, or all day when Himawari is down) would ask for
+		// every pixel.
+		return null;
 	}
 
 	try {
@@ -464,11 +477,12 @@ async function fetchSatellite(locations: WeatherLocation[], date: string, now: D
 	return satelliteDay(readings, locations, date, now);
 }
 
-// Whether Open-Meteo has readings of a day newer than a cached copy's newest,
-// going by the largest GXP's most-populated pixel: one call, where refetching
-// every pixel is ~310. If it can't tell, it's taken to have none.
+// Whether Open-Meteo has readings of a day newer than a cached copy's newest
+// (any at all, for null), going by the largest GXP's most-populated pixel:
+// one call, where refetching every pixel is ~320. If it can't tell, it's
+// taken to have none.
 async function hasNewerReadings(
-	cached: SatelliteDay,
+	newest: number | null,
 	locations: WeatherLocation[],
 	date: string,
 	now: Date,
@@ -476,10 +490,12 @@ async function hasNewerReadings(
 	const probe = { ...locations[0], pixels: locations[0].pixels.slice(0, 1) };
 	try {
 		const latest = newestReading(await fetchSatellite([probe], date, now));
-		const newest = newestReading(cached);
 		return latest !== null && (newest === null || latest > newest);
 	} catch (error) {
-		console.warn(`Couldn't check for new satellite irradiance for ${date}: ${(error as Error).message}`);
+		// Every reading empty is an answer: there are none yet.
+		if (!(error instanceof WeatherFetchError && error.message === NO_READINGS)) {
+			console.warn(`Couldn't check for new satellite irradiance for ${date}: ${(error as Error).message}`);
+		}
 		return false;
 	}
 }
@@ -538,7 +554,7 @@ function satelliteDay(
 	const empty = locations.every((location) =>
 		pixelsOf(location).every((pixel) => ofDay(pixel[OPEN_METEO_VARIABLES.ghiWm2]).every((value) => value === null)),
 	);
-	if (empty) throw new WeatherFetchError("every reading was empty");
+	if (empty) throw new WeatherFetchError(NO_READINGS);
 
 	return {
 		format: CACHE_FORMAT,
