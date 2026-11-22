@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { modelFingerprint, referenceDay } from "../../src/aggregates/model";
+import { SKY_FACTORS } from "../../src/production/blend";
 import { FARM, ROOFTOP } from "../../src/production/estimate";
 
 const rooftop = { ...ROOFTOP };
 const farm = { ...FARM };
+const skyFactors = SKY_FACTORS.map((row) => [...row]);
 
 afterEach(() => {
 	Object.assign(ROOFTOP, rooftop);
 	Object.assign(FARM, farm);
+	SKY_FACTORS.forEach((row, i) => row.splice(0, row.length, ...skyFactors[i]));
 });
 
 describe("modelFingerprint", () => {
@@ -24,6 +27,12 @@ describe("modelFingerprint", () => {
 	it("changes with the farm model", async () => {
 		const before = await modelFingerprint();
 		FARM.tiltDeg = 30;
+		expect(await modelFingerprint()).not.toBe(before);
+	});
+
+	it("changes with the correction for the sky", async () => {
+		const before = await modelFingerprint();
+		SKY_FACTORS[1][2] = 1.06;
 		expect(await modelFingerprint()).not.toBe(before);
 	});
 });
