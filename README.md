@@ -134,6 +134,20 @@ npm run backtest:pvoutput -- ISL --systems 12345 --from 2026-08-27 --to 2026-10-
 
 It needs `PVOUTPUT_API_KEY` and `PVOUTPUT_SYSTEM_ID` from your PVOutput Settings page, e.g. in `.env` (gitignored). Searching works with any key, but reading other people's systems needs Donation mode on your account; your own system doesn't. Free keys allow 60 requests an hour (300 with Donation mode), and each system takes about three. Each system is modelled at its own location with the capacity the registry would record: the lower of its panel and inverter ratings.
 
+EMI's files come out weeks after each month, so `scripts/backtest-dispatch.ts` uses the System Operator's 5-minute real-time dispatch instead (via [electricitymap](https://api.electricitymap.frenchsta.gg/v1/dispatch/2026-11-01)), which is there the same day. By default it covers the 14 days to yesterday:
+
+```bash
+npm run backtest:dispatch -- farms
+npm run backtest:dispatch -- gxps
+npm run backtest:dispatch -- PAO,WHU,HLY --from 2026-08-14 --to 2026-11-05
+```
+
+`farms` compares every dispatched solar farm's output with the farm array, as `backtest -- farms` does. `gxps` compares each GXP's net grid load with the estimates the API has stored for it (`--api`, default the deployed API), which are always the current model's. Rooftop solar shows up as load going missing, so net load is fitted on a level for each day, a weekday and a weekend time-of-day shape drifting over the period, and the estimate. The slope is how many MW of load went missing per estimated MW: 1 means the grid saw what the API estimated. A second fit adds heating, since cold days are often dull and keep load up. Only GXPs whose estimated solar is at least 10% of their demand at midday are listed (`--min-share`); where it's less, other demand that moves with the weather swamps it, like Christchurch's heating in winter.
+
+The slope measures the capacity and the model together, so one well off 1 at a solar-heavy GXP usually points to capacity. Piako has come out at about 3.5 in every fortnight since August, since its 17.8 MW May step went to Tauhei: its load falls as if it had about 12 MW of solar, not the 3.6 MW left.
+
+A range of two or more fortnights is also broken down by fortnight (`--period` days). Over 14 August – 5 November 2026 the dispatched farms produced more of the farm array's output each fortnight, from 0.92 of their own average to 1.08, most in the south (Clandeboye 0.71 to 1.13) and least in the north. Solar-heavy GXPs didn't rise with them, as they would if the satellite read low sun wrongly, so it's more likely the farms' layouts, such as trackers or flatter tilts, gaining more from the higher sun than a fixed 25° array.
+
 To run them locally, the capacity job first, then the production job, the weather archive job and the aggregate job (R2 is simulated locally too):
 
 ```bash
