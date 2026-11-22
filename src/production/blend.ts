@@ -87,12 +87,47 @@ export function resample(times: number[], values: number[], at: number[]): numbe
 	});
 }
 
-// After the latest satellite reading, how its cloudiness compares with the
-// forecast fades away over this long, so the two don't jump apart.
+// After the latest satellite reading, how it compares with the forecast
+// carries on and fades, so the two don't jump apart: a third as far from the
+// forecast after this long, a seventh after twice it. It's compared as read,
+// not averaged with the readings before it, which would lag it ten minutes
+// behind a rising or falling sun. Replaying the year to November 2026 at the
+// 40 biggest GXPs, from every half hour's latest reading, against the
+// satellite's later readings: half an hour to an hour and a half after the
+// reading, where the estimate for now usually falls, the miss went from
+// 15.9% (the averaged reading, fading straight back to the forecast over two
+// hours, capped at 1.5) to 15.4%, and NZ's total's from 6.5% to 5.5%. Fading
+// over one or three hours, or allowing more than 2.5, did no better.
 export const BRIDGE_MS = 2 * 60 * 60 * 1000;
 // Below this the forecast is too dim to compare the satellite against.
 const MIN_BRIDGE_FORECAST_WM2 = 50;
-const MAX_BRIDGE_RATIO = 1.5;
+const MAX_BRIDGE_RATIO = 2.5;
+
+// The forecast models averaged, each divided by how much sunlight it gave
+// over the year to November 2026 against the satellite (ICON runs 4% dim).
+// Averaging them halves the forecast's misses where they disagree on when
+// and where cloud falls: replayed as above, the miss for now went from 15.4%
+// to 13.3% and for the rest of the day from 17.7% to 15.9%, and NZ's total's
+// from 5.5% to 5.1% and 7.2% to 6.9%; with the satellite down, the forecast
+// alone missed by 16.9% rather than 18.9%. Without the levels ICON and AIFS
+// pull NZ's total low. best_match is ECMWF's 9 km IFS here, and the
+// temperature is taken from it alone.
+export const FORECAST_MODELS = { best_match: 1.007, ecmwf_aifs025_single: 0.979, icon_global: 0.96 };
+export const TEMPERATURE_MODEL = "best_match";
+
+// A variable's mean over the forecast models in a multi-model Open-Meteo
+// series (which suffixes each variable with its model), each model divided by
+// its level. A model with any gap in the series is left out; null if
+// best_match has gaps, since Open-Meteo sometimes sends a past day as nulls.
+export function meanOfModels(series: Record<string, (number | null)[]>, variable: string): number[] | null {
+	const complete = (values: (number | null)[] | undefined): values is number[] =>
+		values !== undefined && !values.includes(null);
+	if (!complete(series[`${variable}_${TEMPERATURE_MODEL}`])) return null;
+	const models = Object.entries(FORECAST_MODELS)
+		.map(([model, level]) => [series[`${variable}_${model}`], level] as const)
+		.filter((entry): entry is readonly [number[], number] => complete(entry[0]));
+	return models[0][0].map((_, i) => models.reduce((total, [values, level]) => total + values[i] / level, 0) / models.length);
+}
 
 export function pixelsAround(lat: number, long: number, capacityMw: number): { lat: number; long: number }[] {
 	const offsets = capacityMw >= MULTI_PIXEL_MIN_MW ? PIXEL_OFFSETS : PIXEL_OFFSETS.slice(0, 1);
@@ -205,12 +240,15 @@ export function smoothReadings(times: number[], readings: (number | null)[]): (n
 }
 
 // Irradiance at each forecast instant: the satellite's up to its latest
-// reading (bridging any gaps), then the forecast.
+// reading (bridging any gaps), then the forecast, carrying on from how the
+// latest reading as read (`asRead`, if the readings are smoothed) compared
+// with it.
 export function blendIrradiance(
 	satelliteTimes: number[],
 	satellite: (number | null)[],
 	forecastTimes: number[],
 	forecast: number[],
+	asRead: (number | null)[] = satellite,
 ): { irradianceWm2: number[]; observedUntil: number | null } {
 	const observed = satelliteTimes
 		.map((time, i) => [time, satellite[i]] as const)
@@ -218,17 +256,14 @@ export function blendIrradiance(
 	if (observed.length === 0) return { irradianceWm2: forecast, observedUntil: null };
 
 	const last = observed[observed.length - 1][0];
+	const latest = asRead[satelliteTimes.indexOf(last)] ?? observed[observed.length - 1][1];
 	const forecastPoints = forecastTimes.map((time, i) => [time, forecast[i]] as const);
 	const lastForecast = interpolate(forecastPoints, last);
-	const ratio =
-		lastForecast >= MIN_BRIDGE_FORECAST_WM2
-			? Math.min(interpolate(observed, last) / lastForecast, MAX_BRIDGE_RATIO)
-			: 1;
+	const ratio = lastForecast >= MIN_BRIDGE_FORECAST_WM2 ? Math.min(latest / lastForecast, MAX_BRIDGE_RATIO) : 1;
 	return {
 		irradianceWm2: forecastTimes.map((time, i) => {
 			if (time <= last) return interpolate(observed, time);
-			const faded = Math.min((time - last) / BRIDGE_MS, 1);
-			return forecast[i] * (ratio + (1 - ratio) * faded);
+			return forecast[i] * (1 + (ratio - 1) * Math.exp(-(time - last) / BRIDGE_MS));
 		}),
 		observedUntil: last,
 	};

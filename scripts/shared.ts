@@ -2,11 +2,14 @@
 import {
 	averagePixels,
 	blendIrradiance,
+	FORECAST_MODELS,
+	meanOfModels,
 	resample,
 	skyFactors,
 	smoothReadings,
 	STEP_MS,
 	stepsThrough,
+	TEMPERATURE_MODEL,
 	type WeatherPoints,
 } from "../src/production/blend.ts";
 import { estimateOutputMw, type SolarCapacity } from "../src/production/estimate.ts";
@@ -57,13 +60,17 @@ export async function fetchWeather(
 	};
 	const [forecast] = await getSeries("https://api.open-meteo.com/v1/forecast", "minutely_15", [points.forecast], {
 		minutely_15: [...SKY_VARIABLES, "temperature_2m", "terrestrial_radiation_instant"].join(","),
+		// Averaged as the API does (see FORECAST_MODELS).
+		models: Object.keys(FORECAST_MODELS).join(","),
 		...range,
 	});
 	const forecastTimes = forecast.time.map((seconds) => seconds * 1000);
 	const times = stepsThrough(forecastTimes);
-	const onSteps = (variable: string) => resample(forecastTimes, forecast[variable] as number[], times);
-	let [ghi, dni, dhi] = SKY_VARIABLES.map(onSteps);
-	const [temperature, topOfAtmosphere] = ["temperature_2m", "terrestrial_radiation_instant"].map(onSteps);
+	const onSteps = (values: number[]) => resample(forecastTimes, values, times);
+	let [ghi, dni, dhi] = SKY_VARIABLES.map((variable) => onSteps(meanOfModels(forecast, variable)!));
+	const [temperature, topOfAtmosphere] = ["temperature_2m", "terrestrial_radiation_instant"].map((variable) =>
+		onSteps(forecast[`${variable}_${TEMPERATURE_MODEL}`] as number[]),
+	);
 
 	if (source === "satellite") {
 		const pixels = await getSeries("https://satellite-api.open-meteo.com/v1/archive", "hourly", points.pixels, {
@@ -82,16 +89,11 @@ export async function fetchWeather(
 				points.pixels.map((pixel) => pixel.weight),
 			);
 		const factors = skyFactors(satelliteTimes, readings(SKY_VARIABLES[0]), points.forecast.lat, points.forecast.long);
-		const blend = (variable: string, fallback: number[]) =>
-			blendIrradiance(
-				satelliteTimes,
-				smoothReadings(
-					satelliteTimes,
-					readings(variable).map((reading, i) => (reading === null ? null : reading * factors[i])),
-				),
-				times,
-				fallback,
-			).irradianceWm2;
+		const blend = (variable: string, fallback: number[]) => {
+			const corrected = readings(variable).map((reading, i) => (reading === null ? null : reading * factors[i]));
+			return blendIrradiance(satelliteTimes, smoothReadings(satelliteTimes, corrected), times, fallback, corrected)
+				.irradianceWm2;
+		};
 		[ghi, dni, dhi] = [blend(SKY_VARIABLES[0], ghi), blend(SKY_VARIABLES[1], dni), blend(SKY_VARIABLES[2], dhi)];
 	}
 

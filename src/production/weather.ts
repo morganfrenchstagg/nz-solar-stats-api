@@ -1,4 +1,15 @@
-import { averagePixels, blendIrradiance, resample, skyFactors, smoothReadings, stepsThrough, type WeatherPoints } from "./blend";
+import {
+	averagePixels,
+	blendIrradiance,
+	FORECAST_MODELS,
+	meanOfModels,
+	resample,
+	skyFactors,
+	smoothReadings,
+	stepsThrough,
+	TEMPERATURE_MODEL,
+	type WeatherPoints,
+} from "./blend";
 
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const OPEN_METEO_SATELLITE_URL = "https://satellite-api.open-meteo.com/v1/archive";
@@ -28,7 +39,8 @@ const LOCATIONS_PER_REQUEST = 100;
 // Bumped when what's cached changes shape, so older copies are fetched again.
 export const CACHE_FORMAT = 2;
 // Sunlight on flat ground, straight from the sun and from the rest of the sky.
-// Three variables and the temperature still count as one Open-Meteo call.
+// Three variables and the temperature, from three models (see
+// FORECAST_MODELS), still count as one Open-Meteo call for a day.
 const COMPONENTS = ["ghiWm2", "dniWm2", "dhiWm2"] as const;
 const OPEN_METEO_VARIABLES = {
 	ghiWm2: "shortwave_radiation_instant",
@@ -161,7 +173,7 @@ export function blendWeather(
 			for (const component of COMPONENTS) {
 				const corrected = readings[component].map((reading, i) => (reading === null ? null : reading * factors[i]));
 				const smoothed = smoothReadings(satellite.times, corrected);
-				const blend = blendIrradiance(satellite.times, smoothed, times, location[component]);
+				const blend = blendIrradiance(satellite.times, smoothed, times, location[component], corrected);
 				location[component] = blend.irradianceWm2;
 				if (blend.observedUntil !== null) observedUntil = Math.max(observedUntil ?? 0, blend.observedUntil);
 			}
@@ -346,6 +358,7 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 			`${OPEN_METEO_FORECAST_URL}?${new URLSearchParams({
 				...coordinates(batch.map((location) => location.forecast)),
 				minutely_15: [...Object.values(OPEN_METEO_VARIABLES), "temperature_2m"].join(","),
+				models: Object.keys(FORECAST_MODELS).join(","),
 				...sharedParams(date),
 			})}`,
 		);
@@ -361,11 +374,18 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 		const body = await res.json<OpenMeteoForecast | OpenMeteoForecast[]>();
 		forecasts.push(...(Array.isArray(body) ? body : [body]));
 	}
+	// Each location's sunlight averaged over the models (see FORECAST_MODELS).
 	// Open-Meteo has been seen sending every value as null for a past day.
-	const hasGaps = forecasts.some(({ minutely_15: forecast }) =>
-		[...Object.values(OPEN_METEO_VARIABLES), "temperature_2m"].some((variable) => forecast[variable].includes(null)),
-	);
-	if (hasGaps) {
+	const averaged = forecasts.map(({ minutely_15: series }) => {
+		const sky = Object.fromEntries(
+			COMPONENTS.map((component) => [component, meanOfModels(series, OPEN_METEO_VARIABLES[component])]),
+		) as Record<Component, number[] | null>;
+		const temperatureC = series[`temperature_2m_${TEMPERATURE_MODEL}`];
+		return COMPONENTS.some((component) => sky[component] === null) || !temperatureC || temperatureC.includes(null)
+			? null
+			: { ...(sky as Record<Component, number[]>), temperatureC: temperatureC as number[] };
+	});
+	if (averaged.includes(null)) {
 		throw new WeatherFetchError(`Open-Meteo sent weather with gaps for ${date}; try again later`);
 	}
 
@@ -376,14 +396,10 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 		times: forecasts[0].minutely_15.time.map((seconds) => seconds * 1000),
 		locations: Object.fromEntries(
 			locations.map((location, i) => {
-				const series = forecasts[i].minutely_15;
 				const weather: LocationWeather = {
 					lat: location.forecast.lat,
 					long: location.forecast.long,
-					temperatureC: series.temperature_2m as number[],
-					ghiWm2: series[OPEN_METEO_VARIABLES.ghiWm2] as number[],
-					dniWm2: series[OPEN_METEO_VARIABLES.dniWm2] as number[],
-					dhiWm2: series[OPEN_METEO_VARIABLES.dhiWm2] as number[],
+					...averaged[i]!,
 				};
 				return [location.id, weather];
 			}),
