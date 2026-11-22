@@ -50,8 +50,8 @@ function sky(time: number[], irradiance: (number | null)[]) {
 // Open-Meteo's ERA5 archive (hourly, NZ days), satellite archive (10-minute,
 // UTC days) and forecast (15-minute, for the production job): Islington gets
 // 1000 W/m² at 25 °C, everywhere else none at 12 °C. ERA5 has nothing after
-// `era5Until`.
-function mockOpenMeteo({ era5Until = "2026-10-21" } = {}) {
+// `era5Until`, and the satellite nothing from `satelliteUntil` (epoch ms).
+function mockOpenMeteo({ era5Until = "2026-10-21", satelliteUntil = Infinity } = {}) {
 	return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		const url = new URL(String(input instanceof Request ? input.url : input));
 		const from = url.searchParams.get("start_date")!;
@@ -63,7 +63,7 @@ function mockOpenMeteo({ era5Until = "2026-10-21" } = {}) {
 			const start = Date.parse(`${from}T00:00:00Z`) / 1000;
 			const days = (Date.parse(`${to}T00:00:00Z`) / 1000 - start) / 86400 + 1;
 			const times = Array.from({ length: days * 144 }, (_, i) => start + i * 600);
-			const arrived = (time: number) => time * 1000 <= Date.now() - 30 * 60 * 1000;
+			const arrived = (time: number) => time * 1000 <= Date.now() - 30 * 60 * 1000 && time * 1000 < satelliteUntil;
 			return Response.json(
 				lats.map((lat, i) => ({
 					hourly: sky(times, times.map((t) => (!arrived(t) ? null : nearIslington(lat, longs[i]) ? 1000 : 0))),
@@ -220,6 +220,62 @@ describe("runWeatherArchiveJob", () => {
 		mockOpenMeteo({ era5Until: "2026-01-01" });
 		await expect(runWeatherArchiveJob(env, new Date())).rejects.toThrow("Open-Meteo sent no ERA5 weather from 2026-10-07 to 2026-10-20");
 		expect(await days()).toEqual([]);
+	});
+
+	it("keeps the production job's forecast for a day the satellite stopped partway through, and asks again a week later", async () => {
+		mockOpenMeteo({ satelliteUntil: Date.parse("2026-10-20T12:00:00+13:00") });
+		// The production job finishes the 20th just after midnight, with
+		// readings for its morning only, so the day's weather never becomes final.
+		vi.setSystemTime(Date.parse("2026-10-21T00:30:00+13:00"));
+		await runProductionJob(env, new Date());
+		vi.setSystemTime(NOW);
+		await runAggregateJob(env, new Date());
+
+		expect((await runWeatherArchiveJob(env, new Date())).at(-1)).toBe("2026-10-20");
+		const gappy = await stored(archivedWeatherKey("2026-10-20"));
+		expect(gappy.forecast.model).toBeUndefined();
+		expect(gappy.forecast.fetchedAt).toBe("2026-10-20T11:30:00.000Z");
+		expect(gappy.satellite.locations.ISL.ghiWm2.filter((value: number | null) => value !== null)).toHaveLength(72);
+		expect((await stored(archivedWeatherKey("2026-10-19"))).forecast.model).toBe("era5_seamless");
+		const unavailable = Object.fromEntries((await days()).map((day: any) => [day.nz_date, day.weather_unavailable_at]));
+		expect([unavailable["2026-10-19"], unavailable["2026-10-20"]]).toEqual([null, "2026-10-26T01:00:00.000Z"]);
+
+		// Not again within the week, once everything else is fetched.
+		await archiveAll();
+		expect(await runWeatherArchiveJob(env, new Date())).toEqual([]);
+
+		// A week later the satellite has caught up: new days come first, then the 20th.
+		vi.setSystemTime(NOW + 7 * DAY_MS);
+		vi.restoreAllMocks();
+		mockOpenMeteo({ era5Until: "2026-10-30" });
+		expect((await runWeatherArchiveJob(env, new Date()))[0]).toBe("2026-10-21");
+		expect(await runWeatherArchiveJob(env, new Date())).toEqual(["2026-10-20"]);
+		const filled = await stored(archivedWeatherKey("2026-10-20"));
+		expect(filled.forecast.model).toBe("era5_seamless");
+		expect(filled.satellite.locations.ISL.ghiWm2.every((value: number | null) => value !== null)).toBe(true);
+		expect((await days()).find((day: any) => day.nz_date === "2026-10-20").weather_unavailable_at).toBeNull();
+	});
+
+	it("carries on through recent days the satellite has no readings for at all", async () => {
+		mockOpenMeteo({ satelliteUntil: 0 });
+		const archived = await runWeatherArchiveJob(env, new Date());
+		expect([archived.length, archived.at(-1)]).toEqual([14, "2026-10-20"]);
+		const weather = await stored(archivedWeatherKey("2026-10-20"));
+		expect([weather.forecast.model, weather.satellite]).toEqual(["era5_seamless", null]);
+		expect((await days()).every((day: any) => day.weather_unavailable_at === "2026-10-26T01:00:00.000Z")).toBe(true);
+		expect((await runWeatherArchiveJob(env, new Date()))[0]).toBe("2026-09-23");
+	});
+
+	it("fails without storing anything when the satellite sends nothing for days too old to ask again", async () => {
+		// Two months on, with every day from September on already fetched.
+		vi.setSystemTime(NOW + 60 * DAY_MS);
+		await env.DB.prepare(
+			`WITH RECURSIVE dates (date) AS (SELECT '2026-09-01' UNION ALL SELECT date(date, '+1 day') FROM dates WHERE date < '2026-12-19')
+			INSERT INTO production_days (nz_date, weather) SELECT date, 'r2 earlier' FROM dates`,
+		).run();
+		mockOpenMeteo({ satelliteUntil: 0 });
+		await expect(runWeatherArchiveJob(env, new Date())).rejects.toThrow("Open-Meteo sent no satellite readings from 2026-08-31 to 2026-08-31");
+		expect((await days()).find((day: any) => day.nz_date === "2026-08-31")).toBeUndefined();
 	});
 
 	it("leaves days the production job has cached to it", async () => {
