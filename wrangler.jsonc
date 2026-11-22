@@ -21,6 +21,12 @@
 		// next one storing their data.
 		"crons": ["0 18 * * *", "*/10 * * * *", "5,15,25,35,45,55 * * * *", "35 10,14 * * *"]
 	},
+	"vars": {
+		// Rānui solar farm's Node-RED dashboard, host:port, whose readings
+		// the production job stores (src/production/dashboard.ts). Empty to
+		// model the farm instead.
+		"RANUI_DASHBOARD": "114.23.118.154:1880"
+	},
 	"d1_databases": [
 		{
 			"binding": "DB",

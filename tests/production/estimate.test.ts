@@ -13,6 +13,7 @@ import { planeOfArrayWm2, sunAt } from "../../src/production/solar";
 const sun = sunAt(Date.parse("2026-10-26T00:30:00Z"), -43.5, 172.5);
 const clear = { ghiWm2: 950, dniWm2: 900, dhiWm2: 950 - 900 * Math.sin((sun.elevationDeg * Math.PI) / 180) };
 const overcast = { ghiWm2: 300, dniWm2: 0, dhiWm2: 300 };
+const MINUTE = 60 * 1000;
 
 describe("arrayOutputMw", () => {
 	it("is zero in the dark", () => {
@@ -99,5 +100,50 @@ describe("estimateProduction", () => {
 		expect(estimateProduction(gxps, weather, null)).toEqual([
 			{ ...gxps[0], productionMw: null, irradianceWm2: null, temperatureC: null, profileMw: [0, noonMw, 0] },
 		]);
+	});
+
+	describe("with a metered farm", () => {
+		// 4 MW of rooftops and 6 MW of farms, 5 MW of them metered.
+		const withFarms = [{ gxp: "ISL", name: "Islington", distributedMw: 10, farmMw: 6 }];
+		const [first, noon, last] = weather.times;
+		const reading = (time: number, mw: number) => ({ time, mw });
+		const farm = (readings: { time: number; mw: number }[]) => ({ gxp: "ISL", capacityMw: 5, exportLimitMw: 4.5, readings });
+		const modelled = (capacity: { rooftopMw: number; farmMw: number }) => estimateOutputMw(capacity, overcast, sun, 15);
+		const rest = modelled({ rooftopMw: 4, farmMw: 1 });
+
+		it("uses the readings within five minutes of each step in place of the farm", () => {
+			const readings = [reading(noon - 6 * MINUTE, 9), reading(noon - 4 * MINUTE, 2), reading(noon + 2 * MINUTE, 3), reading(noon + 5 * MINUTE, 9)];
+			const [isl] = estimateProduction(withFarms, weather, null, [farm(readings)]);
+			expect(isl.profileMw[1]).toBeCloseTo(rest + 2.5, 3);
+			// The farm's capacity is still counted as it was.
+			expect(isl).toMatchObject({ distributedMw: 10, farmMw: 6 });
+		});
+
+		it("models the farm, held to what it can export, where there are no readings", () => {
+			const [isl] = estimateProduction(withFarms, weather, null, [farm([reading(first, 0)])]);
+			const farmMw = Math.min(arrayOutputMw(5, planeOfArrayWm2(overcast, sun, FARM), 15, FARM), 4.5);
+			expect(isl.profileMw[1]).toBeCloseTo(rest + farmMw, 3);
+			expect(isl.profileMw[1]).toBeCloseTo(modelled({ rooftopMw: 4, farmMw: 6 }), 3);
+			const [sunny] = estimateProduction(withFarms, { ...weather, locations: { ISL: { ...weather.locations.ISL, ghiWm2: [0, 1400, 0], dhiWm2: [0, 1400, 0] } } }, null, [farm([])]);
+			const sunnyRest = estimateOutputMw({ rooftopMw: 4, farmMw: 1 }, { ghiWm2: 1400, dniWm2: 0, dhiWm2: 1400 }, sun, 15);
+			expect(sunny.profileMw[1]).toBeCloseTo(sunnyRest + 4.5, 3);
+		});
+
+		it("doesn't count what the farm draws at night as negative output", () => {
+			const [isl] = estimateProduction(withFarms, weather, null, [farm([reading(last, -0.02)])]);
+			expect(isl.profileMw[2]).toBe(0);
+		});
+
+		it("uses the readings in the five minutes to now", () => {
+			const at = noon + 7 * MINUTE;
+			const readings = [reading(noon, 1), reading(at - 4 * MINUTE, 3), reading(at - 2 * MINUTE, 4)];
+			const [isl] = estimateProduction(withFarms, weather, new Date(at), [farm(readings)]);
+			const [unmetered] = estimateProduction([{ ...withFarms[0], farmMw: 1, distributedMw: 5 }], weather, new Date(at));
+			expect(isl.productionMw).toBeCloseTo(unmetered.productionMw! + 3.5, 3);
+		});
+
+		it("leaves other GXPs alone", () => {
+			expect(estimateProduction(gxps, weather, null, [{ ...farm([reading(noon, 3)]), gxp: "BLN" }])[0].profileMw).toEqual([0, noonMw, 0]);
+		});
 	});
 });

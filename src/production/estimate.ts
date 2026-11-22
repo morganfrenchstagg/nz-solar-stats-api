@@ -62,6 +62,25 @@ export interface GxpCapacity {
 	farmMw: number; // part of distributedMw
 }
 
+// A farm-sized step whose own output is metered, like Rānui at Blenheim. Its
+// readings are used in place of the farm array wherever there are any; the
+// array, held to what the farm can export, fills the gaps and the forecast.
+export interface MeteredFarm {
+	gxp: string;
+	capacityMw: number; // its step in the registry, part of the GXP's farmMw
+	exportLimitMw: number;
+	readings: Reading[]; // in time order
+}
+
+export interface Reading {
+	time: number; // Unix ms
+	mw: number;
+}
+
+// Each 10-minute step's metered output is the average of the readings within
+// five minutes of it, the 10 minutes the step stands for.
+const METERED_WINDOW_MS = 5 * 60 * 1000;
+
 export interface GxpProduction extends GxpCapacity {
 	// Output and weather at the moment asked about, or null for a whole past day.
 	productionMw: number | null;
@@ -119,14 +138,29 @@ export function estimateProduction(
 	gxps: GxpCapacity[],
 	weather: DayWeather,
 	at: Date | null,
+	meteredFarms: MeteredFarm[] = [],
 ): GxpProduction[] {
 	return gxps.map((gxp) => {
 		const location = weather.locations[gxp.gxp];
-		const capacity = { rooftopMw: gxp.distributedMw - gxp.farmMw, farmMw: gxp.farmMw };
+		const farm = meteredFarms.find((metered) => metered.gxp === gxp.gxp);
+		const meteredMw = farm ? Math.min(farm.capacityMw, gxp.farmMw) : 0;
+		const capacity = { rooftopMw: gxp.distributedMw - gxp.farmMw, farmMw: gxp.farmMw - meteredMw };
+		// The metered farm's readings from `from` to `to`, or its array's output.
+		const outputMw = (sky: Sky, sun: Sun, temperatureC: number, from: number, to: number) => {
+			let mw = estimateOutputMw(capacity, sky, sun, temperatureC);
+			if (farm && meteredMw > 0) {
+				const modelledMw = () =>
+					Math.min(arrayOutputMw(meteredMw, planeOfArrayWm2(sky, sun, FARM), temperatureC, FARM), farm.exportLimitMw);
+				mw += meteredAverageMw(farm.readings, from, to) ?? modelledMw();
+			}
+			return mw;
+		};
 		const profileMw = weather.times.map((time, i) => {
 			const sky = { ghiWm2: location.ghiWm2[i], dniWm2: location.dniWm2[i], dhiWm2: location.dhiWm2[i] };
 			const sun = sunAt(time, location.lat, location.long);
-			return round(estimateOutputMw(capacity, sky, sun, location.temperatureC[i]));
+			return round(
+				outputMw(sky, sun, location.temperatureC[i], time - METERED_WINDOW_MS, time + METERED_WINDOW_MS),
+			);
 		});
 		if (!at) {
 			return { ...gxp, productionMw: null, irradianceWm2: null, temperatureC: null, profileMw };
@@ -138,12 +172,27 @@ export function estimateProduction(
 		const temperatureNow = valueNow(location.temperatureC);
 		return {
 			...gxp,
-			productionMw: round(estimateOutputMw(capacity, sky, sun, temperatureNow)),
+			// The readings in the five minutes to now.
+			productionMw: round(outputMw(sky, sun, temperatureNow, at.getTime() - METERED_WINDOW_MS, at.getTime() + 1)),
 			irradianceWm2: round(rooftopIrradianceWm2(sky, sun), 1),
 			temperatureC: round(temperatureNow, 1),
 			profileMw,
 		};
 	});
+}
+
+// The average of the readings from `from` up to `to`, or null if there are
+// none. A farm draws a little at night, which isn't solar output.
+export function meteredAverageMw(readings: Reading[], from: number, to: number): number | null {
+	let total = 0;
+	let count = 0;
+	for (const reading of readings) {
+		if (reading.time >= to) break;
+		if (reading.time < from) continue;
+		total += reading.mw;
+		count++;
+	}
+	return count === 0 ? null : Math.max(total / count, 0);
 }
 
 // Linearly interpolates a forecast between the instants either side of `at`.

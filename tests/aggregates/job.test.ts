@@ -6,7 +6,9 @@ import { archivedWeatherKey, energyKey, tenMinuteKey } from "../../src/aggregate
 import worker from "../../src/index";
 import { SKY_FACTORS } from "../../src/production/blend";
 import { ROOFTOP, round } from "../../src/production/estimate";
-import { runProductionJob } from "../../src/production/job";
+import type { HttpRequest } from "../../src/production/dashboard";
+import { estimateKey, runProductionJob } from "../../src/production/job";
+import { RANUI, storeRanuiReadings } from "../../src/production/ranui";
 import { nzDate } from "../../src/production/weather";
 
 // 2pm on Monday 26 October in NZ. ERA5 is five days behind, so the archive
@@ -130,6 +132,7 @@ beforeEach(async () => {
 		env.DB.prepare("DELETE FROM satellite_irradiance"),
 		env.DB.prepare("DELETE FROM production_days"),
 		env.DB.prepare("DELETE FROM aggregate_state"),
+		env.DB.prepare("DELETE FROM farm_readings"),
 		env.DB.prepare(
 			`INSERT INTO gxps (site_id, name, type, island, lat, long) VALUES
 			('ISL', 'Islington', 'ACSTN', 'south', ${ISLINGTON_LAT}, 172.5),
@@ -227,6 +230,60 @@ describe("runWeatherArchiveJob", () => {
 
 		// Not indexed yet, but the aggregate job will.
 		expect(await runWeatherArchiveJob(env, new Date())).not.toContain("2026-10-19");
+	});
+});
+
+describe("Rānui's readings", () => {
+	const MINUTE = 60 * 1000;
+	// Rānui's dashboard, charting 7.5 MW every 2 minutes over the last hour.
+	const dashboard: HttpRequest = async (method, path, body) => {
+		if (!path.includes("sid=")) return `0{"sid":"abc"}`;
+		if (method === "POST") {
+			if (body === "40") queued.push(`40{}`, `42${JSON.stringify(["ui-config", "base", { widgets: { hour: { type: "ui-chart", props: { label: "Ranui Solar Output Hour", removeOlder: 60, removeOlderUnit: "60" } } } }])}`);
+			if (body?.startsWith("42")) {
+				const messages = Array.from({ length: 30 }, (_, i) => ({ _datapoint: { x: NOW - 58 * MINUTE + i * 2 * MINUTE, y: 7.5 } }));
+				queued.push(`42${JSON.stringify(["widget-load:hour", messages])}`);
+			}
+			return "ok";
+		}
+		return queued.splice(0).join("\x1e");
+	};
+	let queued: string[] = [];
+
+	it("are stored by the production job and used for Blenheim in place of modelling the farm", async () => {
+		// Blenheim gets no light in these tests, so all its output is Rānui's.
+		await env.DB.batch([
+			env.DB.prepare("INSERT INTO gxps (site_id, name, type, island, lat, long) VALUES ('BLN', 'Blenheim', 'ACSTN', 'south', -41.5, 173.96)"),
+			env.DB.prepare(
+				`INSERT INTO solar_capacity (nsp, gxp, month_end, icp_count, installed_mw, dispatched_mw, step_mw) VALUES
+				('BLN0331MKTLGN', 'BLN', '2026-08-31', 1780, 42, 0, ${RANUI.capacityMw}),
+				('BLN0331MKTLGN', 'BLN', '2026-09-30', 1818, 42, 0, 0)`,
+			),
+		]);
+		mockOpenMeteo();
+		await runProductionJob(env, new Date(), dashboard);
+
+		const { count } = (await env.DB.prepare("SELECT count(*) AS count FROM farm_readings WHERE farm = 'ranui'").first<{ count: number }>())!;
+		expect(count).toBe(30);
+		const today = await stored(estimateKey("2026-10-26"));
+		const blenheim = today.gxps.find((gxp: any) => gxp.gxp === "BLN");
+		expect(blenheim).toMatchObject({ distributedMw: 42, farmMw: RANUI.capacityMw, productionMw: 7.5 });
+		const times: string[] = today.profileTimes;
+		const at = (time: string) => blenheim.profileMw[times.indexOf(time)];
+		// Readings run from 1:02pm to 2pm NZ time.
+		expect([at("2026-10-25T23:50:00.000Z"), at("2026-10-26T00:00:00.000Z"), at("2026-10-26T01:00:00.000Z"), at("2026-10-26T01:10:00.000Z")]).toEqual([0, 7.5, 7.5, 0]);
+		expect(today.meteredFarms).toEqual([
+			{ gxp: "BLN", capacityMw: RANUI.capacityMw, readingsFrom: "2026-10-26T00:02:00.000Z", readingsUntil: "2026-10-26T01:00:00.000Z" },
+		]);
+	});
+
+	it("don't hold up the estimate when the dashboard is down", async () => {
+		mockOpenMeteo();
+		const down: HttpRequest = async () => {
+			throw new Error("connection refused");
+		};
+		await expect(runProductionJob(env, new Date(), down)).rejects.toThrow("Couldn't read Rānui's dashboard: connection refused");
+		expect(await env.DATASET.head(estimateKey("2026-10-26"))).not.toBeNull();
 	});
 });
 
@@ -375,6 +432,20 @@ describe("runAggregateJob", () => {
 		expect(await runWeatherArchiveJob(env, new Date())).toEqual(["2026-10-20"]);
 		expect(await runAggregateJob(env, new Date())).toEqual(["2026-10-20"]);
 		expect((await days()).find((day: any) => day.nz_date === "2026-10-20").weather_points_current).toBe(1);
+	});
+
+	it("estimates a day again once more of Rānui's readings are stored for it", async () => {
+		mockOpenMeteo();
+		await archiveAll();
+		await aggregateAll();
+
+		const noon = Date.parse("2026-10-20T12:00:00+13:00");
+		expect(await storeRanuiReadings(env.DB, [{ time: noon, mw: 5 }])).toEqual(["2026-10-20"]);
+		expect(await runAggregateJob(env, new Date())).toEqual(["2026-10-20"]);
+		expect(await runAggregateJob(env, new Date())).toEqual([]);
+		// Readings it already has change nothing.
+		await storeRanuiReadings(env.DB, [{ time: noon, mw: 6 }]);
+		expect(await runAggregateJob(env, new Date())).toEqual([]);
 	});
 
 	it("runs five minutes after the production job from its cron trigger", async () => {
