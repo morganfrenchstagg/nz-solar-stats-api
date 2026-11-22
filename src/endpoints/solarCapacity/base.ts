@@ -21,7 +21,7 @@ export const capacity = z.object({
 	stepMw: z
 		.number()
 		.describe(
-			"Distributed capacity that arrived this month in farm-sized steps, such as a solar farm too small to be dispatched: part of distributedMw, but a one-off rather than steady growth",
+			"Distributed capacity that arrived this month in farm-sized steps, such as a solar farm too small to be dispatched: part of distributedMw, but a one-off rather than steady growth. Negative when such a farm left the NSP in the registry",
 		),
 });
 

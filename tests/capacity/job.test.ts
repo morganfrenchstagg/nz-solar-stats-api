@@ -123,9 +123,11 @@ describe("runCapacityJob", () => {
 		]);
 	});
 
-	it("takes a grid-connected farm's steps at nearby NSPs out of distributed solar", async () => {
-		// Tauhei, commissioned in May 2026 at Waihou 110 kV, also turned up in the
-		// registry at Piako and Waihou's 33 kV NSP that month.
+	it("follows a grid-connected farm's capacity when the registry moves it", async () => {
+		// Tauhei, commissioned in May 2026 at Waihou 110 kV, turned up in the
+		// registry at Waihou's 33 kV NSP and Piako that month. Piako's step was
+		// half local generation; the registry moved the other half to Waihou in
+		// October.
 		const csv = [
 			...emiCsv.split("\r\n").slice(0, 13),
 			"31/03/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),315,4.71134,2.712,8.609,5,9.048",
@@ -134,6 +136,10 @@ describe("runCapacityJob", () => {
 			"30/04/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),276,3.95529,4.171,15.112,7,8.869",
 			"31/05/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),332,4.94121,20.709,62.376,16,568.534",
 			"31/05/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),281,4.01888,8.562,30.470,5,878.196",
+			"30/09/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),360,5.35834,21.229,58.969,10,21.443",
+			"30/09/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),303,4.33677,8.840,29.175,9,16.776",
+			"31/10/2026,PAO1101POCOGN,PAO1101POCOGN,All combined,Solar (All),367,5.46254,12.418,33.837,8,11.149",
+			"31/10/2026,WHU0331POCOGN,WHU0331POCOGN,All combined,Solar (All),308,4.40834,17.789,57.756,4,12.273",
 			"",
 		].join("\r\n");
 		const tauhei = {
@@ -146,21 +152,54 @@ describe("runCapacityJob", () => {
 			{ long: 175.5608, lat: -37.6507, siteId: "PAO", description: "Piako", type: "ACSTN", gridZone: 4, island: "north" },
 			{ long: 175.6832, lat: -37.5692, siteId: "WHU", description: "Waihou", type: "ACSTN", gridZone: 4, island: "north" },
 		]);
-		const result = await runCapacityJob(env, now);
+		const result = await runCapacityJob(env, new Date("2026-11-22T18:00:00Z"));
 
 		expect(result.farmsNotInEmi).toEqual([]);
-		const steps = await env.DB.prepare("SELECT nsp, month_end, round(mw, 1) AS mw FROM dispatched_solar_steps ORDER BY nsp").all();
-		expect(steps.results).toEqual([
-			{ nsp: "PAO1101POCOGN", month_end: "2026-05-31", mw: 17.8 },
-			{ nsp: "WHU0331POCOGN", month_end: "2026-05-31", mw: 4.3 },
-		]);
-		const may = await env.DB.prepare(
-			"SELECT gxp, round(distributed_mw, 3) AS distributed, step_mw FROM solar_capacity WHERE month_end = '2026-05-31' ORDER BY gxp",
+		const steps = await env.DB.prepare(
+			"SELECT nsp, month_end, round(mw, 1) AS mw FROM dispatched_solar_steps ORDER BY month_end, nsp",
 		).all();
-		// What's left is April's rooftops plus May's new ones.
-		expect(may.results).toEqual([
-			{ gxp: "PAO", distributed: 2.879, step_mw: 0 },
-			{ gxp: "WHU", distributed: 4.216, step_mw: 0 },
+		expect(steps.results).toEqual([
+			{ nsp: "PAO1101POCOGN", month_end: "2026-05-31", mw: 8.9 },
+			{ nsp: "WHU0331POCOGN", month_end: "2026-05-31", mw: 4.3 },
+			{ nsp: "PAO1101POCOGN", month_end: "2026-10-31", mw: -8.9 },
+			{ nsp: "WHU0331POCOGN", month_end: "2026-10-31", mw: 8.9 },
+		]);
+		const capacity = await env.DB.prepare(
+			"SELECT gxp, month_end, round(distributed_mw, 1) AS distributed, round(step_mw, 1) AS step FROM solar_capacity WHERE month_end >= '2026-05-31' ORDER BY gxp, month_end",
+		).all();
+		// Piako keeps the local farm from May, and nothing jumps in October.
+		expect(capacity.results).toEqual([
+			{ gxp: "PAO", month_end: "2026-05-31", distributed: 11.8, step: 8.9 },
+			{ gxp: "PAO", month_end: "2026-09-30", distributed: 12.3, step: 0 },
+			{ gxp: "PAO", month_end: "2026-10-31", distributed: 12.4, step: 0 },
+			{ gxp: "WHU", month_end: "2026-05-31", distributed: 4.2, step: 0 },
+			{ gxp: "WHU", month_end: "2026-09-30", distributed: 4.5, step: 0 },
+			{ gxp: "WHU", month_end: "2026-10-31", distributed: 4.5, step: 0 },
+		]);
+	});
+
+	it("stops modelling a farm as one once it leaves the registry", async () => {
+		const csv = [
+			...emiCsv.split("\r\n").slice(0, 13),
+			"30/06/2025,CBG0111WAIPGN,CBG0111WAIPGN,All combined,Solar (All),749,3.38270,5.009,6.688,7,20.114",
+			"31/07/2025,CBG0111WAIPGN,CBG0111WAIPGN,All combined,Solar (All),756,3.41372,14.244,18.841,8,1154.765",
+			"31/03/2026,CBG0111WAIPGN,CBG0111WAIPGN,All combined,Solar (All),815,3.65859,14.748,18.096,7,13.000",
+			"30/04/2026,CBG0111WAIPGN,CBG0111WAIPGN,All combined,Solar (All),820,3.68002,5.626,6.861,5,7.802",
+			"",
+		].join("\r\n");
+		mockSources(csv, generators, [
+			{ long: 175.47, lat: -37.88, siteId: "CBG", description: "Cambridge", type: "ACSTN", gridZone: 4, island: "north" },
+		]);
+		await runCapacityJob(env, now);
+
+		const capacity = await env.DB.prepare(
+			"SELECT month_end, round(step_mw, 1) AS step FROM solar_capacity ORDER BY month_end",
+		).all();
+		expect(capacity.results).toEqual([
+			{ month_end: "2025-06-30", step: 0 },
+			{ month_end: "2025-07-31", step: 9.1 },
+			{ month_end: "2026-03-31", step: 0 },
+			{ month_end: "2026-04-30", step: -9.1 },
 		]);
 	});
 

@@ -1,10 +1,12 @@
 import {
 	attributeStepsToFarms,
+	type CapacityStep,
 	findCapacitySteps,
 	type FarmStep,
+	stepParts,
 } from "./dispatchedSolar";
 import { fetchDispatchedSolarFarms, fetchSubstations } from "./electricityMap";
-import { type EmiSolarRow, fetchEmiSolarCapacity } from "./emi";
+import { fetchEmiSolarCapacity } from "./emi";
 
 // D1 limits the size of a single value, so big inserts are split up.
 const INSERT_CHUNK_ROWS = 1000;
@@ -48,12 +50,18 @@ export async function runCapacityJob(
 	}
 
 	const steps = findCapacitySteps(emiRows);
-	const farmSteps = attributeStepsToFarms(steps, farms, substations);
+	const farmSteps = attributeStepsToFarms(steps, farms, latestMonthEnd);
 	// Farm-sized steps that aren't dispatched farms stay in distributed_mw,
 	// but are kept apart so they aren't mistaken for steady growth.
 	const otherSteps = steps.filter(
 		(step) => !farmSteps.some((farm) => farm.nsp === step.nsp && farm.monthEnd === step.monthEnd),
 	);
+	// Where each step's capacity was in the registry month by month, which
+	// differs from the step for a system the registry later moved.
+	const farmParts = mergeParts(
+		farmSteps.flatMap((step) => stepParts(step).map((part) => ({ ...part, node: step.node, name: step.name }))),
+	);
+	const otherParts = otherSteps.flatMap(stepParts);
 	const farmsNotInEmi = farms
 		.filter((farm) => !farmSteps.some((step) => step.node === farm.node))
 		.map((farm) => farm.name);
@@ -65,10 +73,10 @@ export async function runCapacityJob(
 		row.monthEnd,
 		row.icpCount,
 		row.capacityMw,
-		dispatchedMw(farmSteps, row),
-		otherSteps.find((step) => step.nsp === row.nsp && step.monthEnd === row.monthEnd)?.mw ?? 0,
+		sumMw(farmParts.filter((part) => part.nsp === row.nsp && part.monthEnd <= row.monthEnd)),
+		sumMw(otherParts.filter((part) => part.nsp === row.nsp && part.monthEnd === row.monthEnd)),
 	]);
-	const stepRows = farmSteps.map((s) => [s.node, s.name, s.nsp, s.monthEnd, s.mw]);
+	const stepRows = farmParts.map((s) => [s.node, s.name, s.nsp, s.monthEnd, s.mw]);
 
 	// EMI only publishes monthly, so most days there is nothing new to write.
 	const fingerprint = await sha256(JSON.stringify([gxpRows, capacityRows, stepRows]));
@@ -113,11 +121,19 @@ export async function runCapacityJob(
 	return result;
 }
 
-// The dispatched farm capacity included in an NSP's EMI total for that month.
-function dispatchedMw(farmSteps: FarmStep[], row: EmiSolarRow): number {
-	const mw = farmSteps
-		.filter((step) => step.nsp === row.nsp && step.monthEnd <= row.monthEnd)
-		.reduce((sum, step) => sum + step.mw, 0);
+// One part per farm, NSP and month, which dispatched_solar_steps is keyed by.
+function mergeParts(parts: FarmStep[]): FarmStep[] {
+	const merged = new Map<string, FarmStep>();
+	for (const part of parts) {
+		const key = `${part.node}|${part.nsp}|${part.monthEnd}`;
+		const existing = merged.get(key);
+		merged.set(key, existing ? { ...existing, mw: sumMw([existing, part]) } : part);
+	}
+	return [...merged.values()];
+}
+
+function sumMw(steps: CapacityStep[]): number {
+	const mw = steps.reduce((sum, step) => sum + step.mw, 0);
 	return Math.round(mw * 1000) / 1000;
 }
 
