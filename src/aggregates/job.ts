@@ -1,4 +1,5 @@
 import { productionEstimate, weatherLocation } from "../production/job";
+import { ranuiFarm, ranuiReadingsOn } from "../production/ranui";
 import {
 	blendWeather,
 	CACHE_FORMAT,
@@ -31,8 +32,8 @@ export interface StoredWeather {
 }
 
 // Estimates every day up to yesterday that has weather and hasn't been
-// estimated, or was estimated with a different model, capacities or weather
-// than it has now, newest first. Each day's 10-minute estimate is stored in
+// estimated, or was estimated with a different model, capacities, weather or
+// metered farm readings than it has now, newest first. Each day's 10-minute estimate is stored in
 // R2 with its energy added to its month's file of days, and the weeks, months
 // and years it's in are summed again from them.
 export async function runAggregateJob(env: Env, now = new Date()): Promise<string[]> {
@@ -59,13 +60,13 @@ export async function runAggregateJob(env: Env, now = new Date()): Promise<strin
 
 	const { results: due } = await db
 		.prepare(
-			`SELECT nz_date AS date, weather FROM production_days
+			`SELECT nz_date AS date, weather, metered FROM production_days
 			WHERE weather IS NOT NULL AND nz_date < ?1
-				AND (model IS NOT ?2 OR capacity IS NULL OR estimated_weather IS NOT weather)
+				AND (model IS NOT ?2 OR capacity IS NULL OR estimated_weather IS NOT weather OR estimated_metered IS NOT metered)
 			ORDER BY nz_date DESC LIMIT ?3`,
 		)
 		.bind(today, model, MAX_DAYS_PER_RUN)
-		.all<{ date: string; weather: string }>();
+		.all<{ date: string; weather: string; metered: string | null }>();
 	if (due.length === 0) return [];
 	history ??= await CapacityHistory.load(db);
 
@@ -73,7 +74,7 @@ export async function runAggregateJob(env: Env, now = new Date()): Promise<strin
 	const updates: D1PreparedStatement[] = [];
 	const estimated: string[] = [];
 	const failures: string[] = [];
-	for (const { date, weather: source } of due) {
+	for (const { date, weather: source, metered } of due) {
 		try {
 			const stored = await storedWeather(env, source, date);
 			if (!stored) {
@@ -88,7 +89,8 @@ export async function runAggregateJob(env: Env, now = new Date()): Promise<strin
 			// have it yet) is left out until it's fetched again.
 			const covered = { ...capacity, gxps: capacity.gxps.filter((gxp) => gxp.gxp in stored.forecast.locations) };
 			const weather = blendWeather(stored.forecast, stored.satellite, covered.gxps.map(weatherLocation));
-			const estimate = productionEstimate(date, covered, weather, null, now);
+			const ranui = ranuiFarm(date, await ranuiReadingsOn(db, date));
+			const estimate = productionEstimate(date, covered, weather, null, now, ranui ? [ranui] : []);
 			await env.DATASET.put(tenMinuteKey(date), JSON.stringify(estimate), JSON_METADATA);
 			const energy = dailyEnergy(estimate);
 			await store.upsert("daily", date.slice(0, 7), energy);
@@ -96,13 +98,14 @@ export async function runAggregateJob(env: Env, now = new Date()): Promise<strin
 			updates.push(
 				db
 					.prepare(
-						`UPDATE production_days SET model = ?, capacity = ?, estimated_weather = ?, weather_points_current = ?,
-							energy_mwh = ?, estimated_at = ? WHERE nz_date = ?`,
+						`UPDATE production_days SET model = ?, capacity = ?, estimated_weather = ?, estimated_metered = ?,
+							weather_points_current = ?, energy_mwh = ?, estimated_at = ? WHERE nz_date = ?`,
 					)
 					.bind(
 						model,
 						await hash(capacity),
 						source,
+						metered,
 						weatherTakenAtPoints(stored.forecast, stored.satellite, locations) ? 1 : 0,
 						energy.totalMwh,
 						now.toISOString(),

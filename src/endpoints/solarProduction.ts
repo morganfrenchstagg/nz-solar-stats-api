@@ -38,7 +38,7 @@ const gxpProduction = production.extend({
 });
 
 const description =
-	"A scheduled job estimates yesterday and today every 10 minutes and stores each NZ date's estimate as a file; this serves the latest. Each GXP's rooftop solar is modelled as arrays tilted 20° facing the ways NZ roofs do (61% north, 19% north-east or north-west, 20% east or west), converting dim light less efficiently, as fitted to NZ rooftop systems on PVOutput. Farm-sized steps in its capacity, solar farms too small to be dispatched, are modelled as a fixed north-facing farm. Weather is taken where its customers live (from Kontur's population grid) rather than at the substation. Direct and diffuse sunlight are from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) every 10 minutes for any time that has already happened, and Open-Meteo's forecast after that (hourly, interpolated), and are worked onto each array's panels; temperature is from the forecast.";
+	"A scheduled job estimates yesterday and today every 10 minutes and stores each NZ date's estimate as a file; this serves the latest. Each GXP's rooftop solar is modelled as arrays tilted 20° facing the ways NZ roofs do (61% north, 19% north-east or north-west, 20% east or west), converting dim light less efficiently, as fitted to NZ rooftop systems on PVOutput. Farm-sized steps in its capacity, solar farms too small to be dispatched, are modelled as a fixed north-facing farm, except that Rānui's metered output is used at Blenheim wherever there are readings. Weather is taken where its customers live (from Kontur's population grid) rather than at the substation. Direct and diffuse sunlight are from Himawari satellite readings (averaged over the GXP's most-populated pixels, by population) every 10 minutes for any time that has already happened, and Open-Meteo's forecast after that (hourly, interpolated), and are worked onto each array's panels; temperature is from the forecast.";
 
 const responses = {
 	"200": {
@@ -56,6 +56,18 @@ const responses = {
 					.describe("Irradiance up to this instant is from satellite readings, after it from the forecast"),
 				attribution: z.string(),
 				profileTimes: z.array(z.string()).describe("The day's 10-minute instants, in UTC"),
+				meteredFarms: z
+					.array(
+						z.object({
+							gxp: z.string(),
+							capacityMw: z.number().describe("Its farm-sized step in the GXP's capacity, part of farmMw"),
+							readingsFrom: z.string(),
+							readingsUntil: z.string(),
+						}),
+					)
+					.describe(
+						"Farms whose own metered output is used in place of modelling them (Rānui at Blenheim), at each step with readings within five minutes of it. Missing from estimates made before readings were used.",
+					),
 				total: production,
 				gxps: z.array(gxpProduction),
 			}),

@@ -18,6 +18,8 @@ export default defineConfig({
 				compatibilityFlags: ["experimental", "nodejs_compat"],
 				bindings: {
 					MIGRATIONS: migrations,
+					// Tests stand in for Rānui's dashboard rather than reach it.
+					RANUI_DASHBOARD: "",
 				},
 			},
 		}),

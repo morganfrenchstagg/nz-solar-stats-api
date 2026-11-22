@@ -8,7 +8,9 @@ import { addMonths, monthBounds } from "./periods";
 // show, such as fetching weather differently. Anything that changes the
 // reference day, from the model's constants to how capacity grows and how
 // days add up, changes the fingerprint by itself.
-export const MODEL_REVISION = 1;
+// 2: Rānui held to its export limit, which the reference day has no farm at
+// Blenheim to show.
+export const MODEL_REVISION = 2;
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
