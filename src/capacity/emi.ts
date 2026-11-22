@@ -8,6 +8,7 @@ export interface EmiSolarRow {
 	icpCount: number;
 	capacityMw: number;
 	newInstallAvgKw: number | null; // null when there were no new installations
+	newInstallCount: number;
 }
 
 export async function fetchEmiSolarCapacity(now: Date): Promise<EmiSolarRow[]> {
@@ -40,6 +41,7 @@ export function parseEmiCsv(csv: string): EmiSolarRow[] {
 	const icpCount = column("ICP count");
 	const capacityMw = column("Total capacity installed (MW)");
 	const newInstallAvgKw = column("Avg. capacity - new installations (kW)");
+	const newInstallCount = column("ICP count - new installations");
 
 	return lines
 		.slice(headerAt + 1)
@@ -54,6 +56,7 @@ export function parseEmiCsv(csv: string): EmiSolarRow[] {
 				capacityMw: Number(cells[capacityMw]),
 				newInstallAvgKw:
 					cells[newInstallAvgKw] === "" ? null : Number(cells[newInstallAvgKw]),
+				newInstallCount: Number(cells[newInstallCount]),
 			};
 		});
 }

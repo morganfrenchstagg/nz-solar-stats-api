@@ -10,8 +10,10 @@ const dispatchedStep = z.object({
 	node: z.string().describe("The farm's pricing node, e.g. ISL0661 KPS0"),
 	name: z.string(),
 	nsp: z.string(),
-	monthEnd: z.string().describe("When this capacity first appeared in EMI"),
-	mw: z.number().describe("Registry nameplate capacity that appeared, in MW AC"),
+	monthEnd: z.string().describe("When this capacity appeared at the NSP in EMI, or left it"),
+	mw: z
+		.number()
+		.describe("Registry nameplate capacity that appeared, in MW AC; negative where the registry moved it to another NSP"),
 });
 
 export class SolarCapacityRead extends OpenAPIRoute {
