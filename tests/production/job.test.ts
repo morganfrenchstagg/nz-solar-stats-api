@@ -2,7 +2,7 @@ import { createExecutionContext, createScheduledController, env } from "cloudfla
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/index";
 import gxpLocations from "../../src/production/gxpLocations.json";
-import { SKY_FACTORS } from "../../src/production/blend";
+import { FORECAST_MODELS, SKY_FACTORS } from "../../src/production/blend";
 import { estimateDay, estimateKey, NoCapacityError, runProductionJob } from "../../src/production/job";
 import { nzDate, WeatherFetchError, WeatherUnavailableError } from "../../src/production/weather";
 
@@ -84,10 +84,13 @@ function mockOpenMeteo({
 			lats.map((lat, i) => {
 				const sunny = nearIslington(lat, longs[i]);
 				return {
-					minutely_15: {
-						...sky(times, times.map(() => (nulls ? null : sunny ? 1000 : 0))),
-						temperature_2m: times.map(() => (nulls ? null : sunny ? 25 : 12)),
-					},
+					minutely_15: byModel(
+						{
+							...sky(times, times.map(() => (nulls ? null : sunny ? 1000 : 0))),
+							temperature_2m: times.map(() => (nulls ? null : sunny ? 25 : 12)),
+						},
+						url,
+					),
 				};
 			}),
 		);
@@ -101,6 +104,17 @@ function sky(time: number[], irradiance: (number | null)[]) {
 		shortwave_radiation_instant: irradiance,
 		direct_normal_irradiance_instant: irradiance.map((value) => (value === null ? null : 0)),
 		diffuse_radiation_instant: irradiance,
+	};
+}
+
+// Open-Meteo suffixes each variable with its model when asked for several.
+function byModel(series: Record<string, unknown>, url: URL) {
+	const models = url.searchParams.get("models")?.split(",");
+	if (!models) return series;
+	const { time, ...values } = series;
+	return {
+		time,
+		...Object.fromEntries(models.flatMap((model) => Object.entries(values).map(([key, value]) => [`${key}_${model}`, value]))),
 	};
 }
 
@@ -138,9 +152,13 @@ async function stored(date: string) {
 // for the sky has its own, and without it the sums here stay simple.
 const skyFactors = SKY_FACTORS.map((row) => [...row]);
 const restoreSkyFactors = () => SKY_FACTORS.forEach((row, i) => row.splice(0, row.length, ...skyFactors[i]));
+// Likewise each forecast model is taken at its own level, so the mocked
+// forecast's sunlight comes through as it is.
+const forecastLevels = { ...FORECAST_MODELS };
 
 beforeEach(async () => {
 	SKY_FACTORS.forEach((row) => row.fill(1));
+	for (const model of Object.keys(FORECAST_MODELS) as (keyof typeof FORECAST_MODELS)[]) FORECAST_MODELS[model] = 1;
 	vi.useFakeTimers({ toFake: ["Date"] });
 	vi.setSystemTime(NOW);
 	// D1 and R2 state are shared between tests, so start each one from the same data.
@@ -173,6 +191,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
 	restoreSkyFactors();
+	Object.assign(FORECAST_MODELS, forecastLevels);
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
@@ -207,6 +226,7 @@ describe("estimateDay", () => {
 		expect(Object.fromEntries(url.searchParams)).toMatchObject({
 			latitude: [gxpLocations.gxps.ISL.centre[0], gxpLocations.gxps.ASB.centre[0]].map((lat) => lat.toFixed(4)).join(","),
 			minutely_15: "shortwave_radiation_instant,direct_normal_irradiance_instant,diffuse_radiation_instant,temperature_2m",
+			models: "best_match,ecmwf_aifs025_single,icon_global",
 			start_date: "2026-10-26",
 			end_date: "2026-10-26",
 			timeformat: "unixtime",
@@ -312,10 +332,11 @@ describe("estimateDay", () => {
 		expect(result.observedUntil).toBe("2026-10-26T00:30:00.000Z");
 		expect(at("13:30")).toBe(at("09:00"));
 		expect(at("13:30")).toBeLessThan(at("18:00"));
-		// Half an hour after the last reading, a quarter of the way back: 1000 × (0.5 + 0.5 × 0.25) = 625 W/m²
-		// of overcast, of which a panel tilted 20° gets 97.6%.
-		expect(isl.irradianceWm2).toBe(609.9);
-		expect(at("15:30")).toBe(49.414); // two hours on, the forecast's own
+		// Half an hour after the last reading, the satellite's half fading as e^(-¼):
+		// 1000 × (1 - 0.5 × 0.779) = 611 W/m² of overcast, of which a panel tilted 20° gets 97.6%.
+		expect(isl.irradianceWm2).toBe(595.9);
+		expect(at("15:30")).toBeGreaterThan(at("13:30"));
+		expect(at("15:30")).toBeLessThan(49.414); // two hours on, still short of the forecast's own
 	});
 
 	it("scales the satellite's readings for the sky once the sun is well up", async () => {

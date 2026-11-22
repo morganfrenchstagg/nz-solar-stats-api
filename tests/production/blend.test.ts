@@ -3,6 +3,7 @@ import {
 	averagePixels,
 	blendIrradiance,
 	BRIDGE_MS,
+	meanOfModels,
 	pixelsAround,
 	resample,
 	skyFactors,
@@ -164,9 +165,27 @@ describe("blendIrradiance", () => {
 		const at = (minutes: number) => irradianceWm2[minutes / 15];
 
 		expect(at(60)).toBe(400);
-		expect(at(60 + BRIDGE_MS / MINUTE / 2)).toBe(600); // halfway back to the forecast
-		expect(at(60 + BRIDGE_MS / MINUTE)).toBe(800);
-		expect(at(480)).toBe(800);
+		// A third of the way from the forecast after BRIDGE_MS, a seventh after twice it.
+		expect(at(60 + BRIDGE_MS / MINUTE)).toBeCloseTo(800 - 400 * Math.exp(-1), 6);
+		expect(at(60 + (2 * BRIDGE_MS) / MINUTE)).toBeCloseTo(800 - 400 * Math.exp(-2), 6);
+		expect(at(480)).toBeCloseTo(800 - 400 * Math.exp(-3.5), 6);
+	});
+
+	it("lets the satellite read up to 2.5 times the forecast before it fades", () => {
+		const dim = forecastTimes.map(() => 100);
+		const satellite = satelliteTimes.map((time) => (time <= 60 * MINUTE ? 400 : null));
+		const { irradianceWm2 } = blendIrradiance(satelliteTimes, satellite, forecastTimes, dim);
+
+		expect(irradianceWm2[60 / 15 + 1]).toBeCloseTo(100 * (1 + 1.5 * Math.exp(-(15 * MINUTE) / BRIDGE_MS)), 6);
+	});
+
+	it("carries on from the latest reading as read, not as smoothed", () => {
+		const smoothed = satelliteTimes.map((time) => (time <= 60 * MINUTE ? 400 : null));
+		const asRead = satelliteTimes.map((time) => (time < 60 * MINUTE ? 400 : time === 60 * MINUTE ? 600 : null));
+		const { irradianceWm2 } = blendIrradiance(satelliteTimes, smoothed, forecastTimes, flatForecast, asRead);
+
+		expect(irradianceWm2[60 / 15]).toBe(400); // up to it, the smoothed readings
+		expect(irradianceWm2[60 / 15 + 1]).toBeCloseTo(800 - 200 * Math.exp(-(15 * MINUTE) / BRIDGE_MS), 6);
 	});
 
 	it("bridges gaps in the satellite readings", () => {
@@ -180,5 +199,30 @@ describe("blendIrradiance", () => {
 		const { irradianceWm2 } = blendIrradiance(satelliteTimes, satellite, forecastTimes, darkForecast);
 
 		expect(irradianceWm2[8]).toBe(800);
+	});
+});
+
+describe("meanOfModels", () => {
+	const series = {
+		time: [0, 1],
+		shortwave_radiation_instant_best_match: [100.7, 201.4],
+		shortwave_radiation_instant_ecmwf_aifs025_single: [97.9, 195.8],
+		shortwave_radiation_instant_icon_global: [96, 192],
+	};
+
+	it("averages the models, each divided by its level", () => {
+		const mean = meanOfModels(series, "shortwave_radiation_instant")!;
+		expect(mean[0]).toBeCloseTo(100, 6);
+		expect(mean[1]).toBeCloseTo(200, 6);
+	});
+
+	it("leaves out a model with gaps", () => {
+		const gappy = { ...series, shortwave_radiation_instant_icon_global: [null, 500] };
+		expect(meanOfModels(gappy, "shortwave_radiation_instant")![1]).toBeCloseTo(200, 6);
+	});
+
+	it("gives nothing if best_match has gaps", () => {
+		const gappy = { ...series, shortwave_radiation_instant_best_match: [null, null] };
+		expect(meanOfModels(gappy, "shortwave_radiation_instant")).toBeNull();
 	});
 });
