@@ -1,5 +1,5 @@
 import { weatherLocation } from "../production/job";
-import { fetchArchiveWeather, nzDate } from "../production/weather";
+import { cachedWeather, fetchArchiveWeather, nzDate, preferredArchiveWeather, satelliteIsComplete } from "../production/weather";
 import { CapacityHistory } from "./capacities";
 import { addDays, datesBetween } from "./periods";
 import { archivedWeatherKey } from "./store";
@@ -15,14 +15,24 @@ const DAYS_PER_FETCH = 14;
 // A day the archive couldn't give (a gap in ERA5) is asked for again after
 // this long, rather than every run.
 const RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+// A day the satellite's readings have gaps in (an outage, like Open-Meteo's
+// from 20 November 2026) is asked for again as often, once there's nothing
+// else to fetch, while it's at most this old, in case they're filled in.
+// For days this recent, no satellite readings at all is taken for an outage;
+// for older ones, which the satellite has always had, it's taken for a glitch
+// and the run fails, to try again on the next.
+const SATELLITE_RETRY_DAYS = 60;
 
 const JSON_METADATA = { httpMetadata: { contentType: "application/json" } };
 
 // Fetches weather from Open-Meteo's archive for up to a fortnight of days the
 // aggregate job can't estimate: those with no weather, newest first, back to
 // when the satellite starts (or the capacity data, if later); then days whose
-// weather was taken where a GXP's isn't any more. Each day's is stored in R2,
-// and the aggregate job estimates it on its next run.
+// weather was taken where a GXP's isn't any more; then recent days the
+// satellite had gaps in. Each day's is stored in R2, and the aggregate job
+// estimates it on its next run. A day the satellite has gaps in keeps the
+// production job's forecast, if it has one, rather than ERA5's sunlight (see
+// preferredArchiveWeather).
 export async function runWeatherArchiveJob(env: Env, now = new Date()): Promise<string[]> {
 	const db = env.DB;
 	const history = await CapacityHistory.load(db);
@@ -54,7 +64,11 @@ export async function runWeatherArchiveJob(env: Env, now = new Date()): Promise<
 	};
 	const missing = datesBetween(first, last).filter((date) => !days.get(date)?.weather && !unindexed.has(date) && !tried(date));
 	const moved = results.filter((day) => day.weather && !day.pointsCurrent && !tried(day.date)).map((day) => day.date);
-	const wanted = (missing.length > 0 ? missing : moved).sort().reverse();
+	const recent = addDays(nzDate(now), -SATELLITE_RETRY_DAYS);
+	const gappy = results
+		.filter((day) => day.weather && day.unavailableAt !== null && day.date >= recent && !tried(day.date))
+		.map((day) => day.date);
+	const wanted = [missing, moved, gappy].find((dates) => dates.length > 0)?.sort().reverse() ?? [];
 	if (wanted.length === 0) return [];
 
 	const window = wanted.filter((date) => date > addDays(wanted[0], -DAYS_PER_FETCH)).reverse();
@@ -62,13 +76,18 @@ export async function runWeatherArchiveJob(env: Env, now = new Date()): Promise<
 		const capacity = history.on(date);
 		return capacity ? [{ date, locations: capacity.gxps.map(weatherLocation) }] : [];
 	});
-	const fetched = requests.length > 0 ? await fetchArchiveWeather(requests, now) : [];
+	const allowNoSatellite = window.some((date) => date >= recent);
+	const fetched = requests.length > 0 ? await fetchArchiveWeather(requests, now, { allowNoSatellite }) : [];
+	const complete = new Set<string>();
 	for (const day of fetched) {
-		await env.DATASET.put(
-			archivedWeatherKey(day.date),
-			JSON.stringify({ forecast: day.forecast, satellite: day.satellite }),
-			JSON_METADATA,
-		);
+		let weather = { forecast: day.forecast, satellite: day.satellite };
+		if (satelliteIsComplete(day.forecast, day.satellite)) {
+			complete.add(day.date);
+		} else {
+			const { locations } = requests.find((request) => request.date === day.date)!;
+			weather = preferredArchiveWeather(weather, await cachedWeather(db, day.date), locations);
+		}
+		await env.DATASET.put(archivedWeatherKey(day.date), JSON.stringify(weather), JSON_METADATA);
 	}
 
 	const fetchedAt = now.toISOString();
@@ -78,11 +97,12 @@ export async function runWeatherArchiveJob(env: Env, now = new Date()): Promise<
 			stored.has(date)
 				? db
 						.prepare(
-							`INSERT INTO production_days (nz_date, weather) VALUES (?1, ?2)
+							`INSERT INTO production_days (nz_date, weather, weather_unavailable_at) VALUES (?1, ?2, ?3)
 							ON CONFLICT (nz_date) DO UPDATE SET weather = excluded.weather, weather_points_current = 1,
-								weather_unavailable_at = NULL`,
+								weather_unavailable_at = excluded.weather_unavailable_at`,
 						)
-						.bind(date, `r2 ${fetchedAt}`)
+						// A day the satellite has gaps in is asked for again later.
+						.bind(date, `r2 ${fetchedAt}`, complete.has(date) ? null : fetchedAt)
 				: db
 						.prepare(
 							`INSERT INTO production_days (nz_date, weather_unavailable_at) VALUES (?1, ?2)

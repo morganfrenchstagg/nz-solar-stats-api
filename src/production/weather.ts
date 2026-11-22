@@ -196,10 +196,36 @@ export async function cachedWeather(
 // fetched after the day was over, and the satellite once its readings ran
 // past the day's last sunlight.
 export function weatherIsFinal(forecast: Forecast, satellite: SatelliteDay | null): boolean {
+	return nzDate(new Date(forecast.fetchedAt)) > forecast.date && satelliteIsComplete(forecast, satellite);
+}
+
+// Whether a day's satellite readings cover all its sunlight.
+export function satelliteIsComplete(forecast: Forecast, satellite: SatelliteDay | null): boolean {
 	const sunlit = sunlitTimes(forecast);
-	if (nzDate(new Date(forecast.fetchedAt)) <= forecast.date) return false;
-	if (sunlit.length === 0) return true;
-	return satellite !== null && satelliteIsFinal(satellite, sunlit);
+	return sunlit.length === 0 || (satellite !== null && satelliteIsFinal(satellite, sunlit));
+}
+
+// A past day's weather from the archive, unless its satellite readings stop
+// before the day's last sunlight and the production job kept a forecast for
+// it fetched after the day was over, where each location's is taken now. With
+// no satellite, the forecast fitted solar farms' output and 15 rooftop-heavy
+// GXPs' load better than ERA5's sunlight over the year to November 2026 (the
+// farms' daily miss was 15.5% against 17.9%), so the forecast stands in for
+// the readings that are missing. The day keeps whichever satellite readings
+// run later, the archive's or the production job's.
+export function preferredArchiveWeather(
+	archived: { forecast: Forecast; satellite: SatelliteDay | null },
+	cached: { forecast: Forecast; satellite: SatelliteDay | null } | null,
+	locations: WeatherLocation[],
+): { forecast: Forecast; satellite: SatelliteDay | null } {
+	if (!cached || satelliteIsComplete(archived.forecast, archived.satellite)) return archived;
+	const { forecast } = cached;
+	if (nzDate(new Date(forecast.fetchedAt)) <= forecast.date || !takenAt(forecast.points, locations, forecastPoint)) {
+		return archived;
+	}
+	const own = cached.satellite && takenAt(cached.satellite.pixels, locations, satellitePixels) ? cached.satellite : null;
+	const newest = (satellite: SatelliteDay | null) => (satellite && newestReading(satellite)) ?? -Infinity;
+	return { forecast, satellite: newest(own) > newest(archived.satellite) ? own : archived.satellite };
 }
 
 // Whether a day's satellite readings run past its last sunlight, however
@@ -375,6 +401,9 @@ async function fetchForecast(locations: WeatherLocation[], date: string, now: Da
 export async function fetchArchiveWeather(
 	days: { date: string; locations: WeatherLocation[] }[],
 	now: Date,
+	// Whether no satellite readings at all is an outage rather than a glitch
+	// to try again later.
+	{ allowNoSatellite = false }: { allowNoSatellite?: boolean } = {},
 ): Promise<{ date: string; forecast: Forecast; satellite: SatelliteDay | null }[]> {
 	const from = days[0].date;
 	const to = days[days.length - 1].date;
@@ -405,7 +434,10 @@ export async function fetchArchiveWeather(
 	const dates = times.map((time) => nzDate(new Date(time)));
 
 	const readings = await fetchSatelliteReadings(all, previousDate(from), to);
-	if ([...readings.pixels.values()].every((pixel) => pixel[OPEN_METEO_VARIABLES.ghiWm2].every((value) => value === null))) {
+	if (
+		!allowNoSatellite &&
+		[...readings.pixels.values()].every((pixel) => pixel[OPEN_METEO_VARIABLES.ghiWm2].every((value) => value === null))
+	) {
 		throw new WeatherFetchError(`Open-Meteo sent no satellite readings from ${from} to ${to}; try again later`);
 	}
 
