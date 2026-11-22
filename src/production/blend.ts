@@ -1,6 +1,7 @@
 // Combines satellite irradiance, for times that have already happened, with
-// the forecast for the rest. Kept free of imports so the backtest scripts can
-// run it under Node too.
+// the forecast for the rest. Solar is imported by its full name so the
+// backtest scripts can run this under Node too.
+import { sunAt } from "./solar.ts";
 
 // GXPs at least this big average up to five satellite pixels, so the estimate
 // reflects the area their rooftops spread over; smaller GXPs use one, to save
@@ -114,6 +115,63 @@ export function averagePixels(
 		});
 		return weight === 0 ? null : total / weight;
 	});
+}
+
+// Once the sun is well up, the satellite reads cloud too dark and clear sky a
+// little bright. This is the output of the six dispatched solar farms with
+// fixed panels over the model's, the year to November 2026, by how clear the
+// satellite had it (its reading as a share of the sunlight above the
+// atmosphere, down the side) and how high the sun was (across). Each reading
+// is scaled by the entry for it, read off between the nearest four. Rooftops
+// bear it out: scaled, the 5-minute load at 15 rooftop-heavy GXPs fitted
+// better in spring at 13 and no differently in the other seasons, and 47
+// rooftop systems on PVOutput went from 7% over the model on cloudy days and
+// 3% under on sunny ones (late October to mid November 2026) to 4% and 2%.
+const SKY_CLEARNESS = [0.14, 0.29, 0.43, 0.58, 0.73];
+const SKY_ELEVATIONS_DEG = [40, 50, 64];
+export const SKY_FACTORS = [
+	[1.05, 1.02, 0.95],
+	[1.11, 1.1, 1.05],
+	[1.07, 1.07, 1.02],
+	[1.03, 1.01, 0.97],
+	[1.03, 0.99, 0.94],
+];
+// With the sun lower the farms fall short too, but that's their rows shading
+// each other and the sun's angle on their panels, not the sky: scaling
+// rooftops by it made all 15 GXPs' load fit worse in autumn and winter. So
+// the factors fade in over the 10° below the table's first column.
+const SKY_FADE_FROM_DEG = 30;
+const RADIANS = Math.PI / 180;
+
+// What to scale a location's satellite readings by at each instant, all three
+// components alike, from its global horizontal readings (see SKY_FACTORS).
+export function skyFactors(times: number[], ghiWm2: (number | null)[], lat: number, long: number): number[] {
+	return times.map((time, i) => {
+		const ghi = ghiWm2[i];
+		if (ghi === null || ghi <= 0) return 1;
+		const sun = sunAt(time, lat, long);
+		if (sun.elevationDeg <= SKY_FADE_FROM_DEG) return 1;
+
+		const clearness = ghi / (sun.extraterrestrialWm2 * Math.sin(sun.elevationDeg * RADIANS));
+		const [row, down] = between(SKY_CLEARNESS, clearness);
+		const [column, across] = between(SKY_ELEVATIONS_DEG, sun.elevationDeg);
+		const factor =
+			SKY_FACTORS[row][column] * (1 - down) * (1 - across) +
+			SKY_FACTORS[row + 1][column] * down * (1 - across) +
+			SKY_FACTORS[row][column + 1] * (1 - down) * across +
+			SKY_FACTORS[row + 1][column + 1] * down * across;
+		const fade = Math.min((sun.elevationDeg - SKY_FADE_FROM_DEG) / (SKY_ELEVATIONS_DEG[0] - SKY_FADE_FROM_DEG), 1);
+		return 1 + fade * (factor - 1);
+	});
+}
+
+// Where a value falls among ascending nodes: the node at or below it and how
+// far it is to the next, holding the ends.
+function between(nodes: number[], value: number): [number, number] {
+	const held = Math.min(Math.max(value, nodes[0]), nodes[nodes.length - 1]);
+	let index = 0;
+	while (index < nodes.length - 2 && held > nodes[index + 1]) index++;
+	return [index, (held - nodes[index]) / (nodes[index + 1] - nodes[index])];
 }
 
 // How far either side of a reading the readings it's averaged with reach,

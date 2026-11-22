@@ -5,6 +5,7 @@ import {
 	BRIDGE_MS,
 	pixelsAround,
 	resample,
+	skyFactors,
 	smoothReadings,
 	stepsThrough,
 	weatherPoints,
@@ -98,6 +99,38 @@ describe("smoothReadings", () => {
 		const smoothed = smoothReadings(times, [100, 200, 300, null, null, null, null]);
 		// (300 × 3 + 200 × 2 + 100) / 6
 		expect(smoothed[2]).toBeCloseTo(1400 / 6);
+	});
+});
+
+describe("skyFactors", () => {
+	// Christchurch on 15 January 2026: the sun is 18° up at 8am, 34° at 9:30am, 40° at 10am and 68° at 1:30pm.
+	const at = (clock: string) => Date.parse(`2026-01-15T${clock}:00+13:00`);
+	const factor = (clock: string, ghiWm2: number | null) => skyFactors([at(clock)], [ghiWm2], -43.53, 172.63)[0];
+
+	it("scales cloud up and clear sky down once the sun is high", () => {
+		// At 1:30pm there's 1,300 W/m² above the atmosphere, on flat ground.
+		expect(factor("13:30", 377)).toBeCloseTo(1.05, 2); // clearness 0.29
+		expect(factor("13:30", 960)).toBeCloseTo(0.94, 2); // 0.74
+		expect(factor("13:30", 1100)).toBe(factor("13:30", 960)); // as clear as the table goes
+	});
+
+	it("reads between the table's entries", () => {
+		const [darker, between, clearer] = [377, 468, 558].map((ghi) => factor("13:30", ghi));
+		expect(clearer).toBeCloseTo(1.02, 2);
+		expect(between).toBeCloseTo((darker + clearer) / 2, 3);
+	});
+
+	it("leaves readings alone while the sun is under 30°, fading in over the next 10°", () => {
+		expect(factor("08:00", 150)).toBe(1);
+		expect(factor("05:00", 0)).toBe(1);
+		// The table has 11% for this much cloud with the sun 40° up; at 34° not half of it yet.
+		expect(factor("10:00", 261)).toBeCloseTo(1.11, 2);
+		expect(factor("09:30", 230)).toBeGreaterThan(1.03);
+		expect(factor("09:30", 230)).toBeLessThan(1.055);
+	});
+
+	it("gives a missing reading nothing to scale", () => {
+		expect(factor("13:30", null)).toBe(1);
 	});
 });
 

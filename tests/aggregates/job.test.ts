@@ -4,6 +4,7 @@ import { runWeatherArchiveJob } from "../../src/aggregates/archive";
 import { runAggregateJob } from "../../src/aggregates/job";
 import { archivedWeatherKey, energyKey, tenMinuteKey } from "../../src/aggregates/store";
 import worker from "../../src/index";
+import { SKY_FACTORS } from "../../src/production/blend";
 import { ROOFTOP, round } from "../../src/production/estimate";
 import { runProductionJob } from "../../src/production/job";
 import { nzDate } from "../../src/production/weather";
@@ -109,7 +110,13 @@ async function aggregateAll() {
 
 const rooftop = { ...ROOFTOP };
 
+// The satellite's readings are used as they are in these tests: the correction
+// for the sky has its own, and without it the sums here stay simple.
+const skyFactors = SKY_FACTORS.map((row) => [...row]);
+const restoreSkyFactors = () => SKY_FACTORS.forEach((row, i) => row.splice(0, row.length, ...skyFactors[i]));
+
 beforeEach(async () => {
+	SKY_FACTORS.forEach((row) => row.fill(1));
 	vi.useFakeTimers({ toFake: ["Date"] });
 	vi.setSystemTime(NOW);
 	// D1 and R2 state are shared between tests, so start each one from the same data.
@@ -145,6 +152,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
 	Object.assign(ROOFTOP, rooftop);
+	restoreSkyFactors();
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });

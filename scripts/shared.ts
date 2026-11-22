@@ -3,6 +3,7 @@ import {
 	averagePixels,
 	blendIrradiance,
 	resample,
+	skyFactors,
 	smoothReadings,
 	STEP_MS,
 	stepsThrough,
@@ -75,15 +76,18 @@ export async function fetchWeather(
 			end_date: [range.end_date, new Date().toISOString().slice(0, 10)].sort()[0],
 		});
 		const satelliteTimes = pixels[0].time.map((seconds) => seconds * 1000);
+		const readings = (variable: string) =>
+			averagePixels(
+				pixels.map((pixel) => pixel[variable]),
+				points.pixels.map((pixel) => pixel.weight),
+			);
+		const factors = skyFactors(satelliteTimes, readings(SKY_VARIABLES[0]), points.forecast.lat, points.forecast.long);
 		const blend = (variable: string, fallback: number[]) =>
 			blendIrradiance(
 				satelliteTimes,
 				smoothReadings(
 					satelliteTimes,
-					averagePixels(
-						pixels.map((pixel) => pixel[variable]),
-						points.pixels.map((pixel) => pixel.weight),
-					),
+					readings(variable).map((reading, i) => (reading === null ? null : reading * factors[i])),
 				),
 				times,
 				fallback,

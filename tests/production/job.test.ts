@@ -2,6 +2,7 @@ import { createExecutionContext, createScheduledController, env } from "cloudfla
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/index";
 import gxpLocations from "../../src/production/gxpLocations.json";
+import { SKY_FACTORS } from "../../src/production/blend";
 import { estimateDay, estimateKey, NoCapacityError, runProductionJob } from "../../src/production/job";
 import { nzDate, WeatherFetchError, WeatherUnavailableError } from "../../src/production/weather";
 
@@ -127,7 +128,13 @@ async function stored(date: string) {
 	return (await env.DATASET.get(estimateKey(date)))?.json<any>();
 }
 
+// The satellite's readings are used as they are in these tests: the correction
+// for the sky has its own, and without it the sums here stay simple.
+const skyFactors = SKY_FACTORS.map((row) => [...row]);
+const restoreSkyFactors = () => SKY_FACTORS.forEach((row, i) => row.splice(0, row.length, ...skyFactors[i]));
+
 beforeEach(async () => {
+	SKY_FACTORS.forEach((row) => row.fill(1));
 	vi.useFakeTimers({ toFake: ["Date"] });
 	vi.setSystemTime(NOW);
 	// D1 and R2 state are shared between tests, so start each one from the same data.
@@ -159,6 +166,7 @@ beforeEach(async () => {
 	]);
 });
 afterEach(() => {
+	restoreSkyFactors();
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
@@ -282,6 +290,19 @@ describe("estimateDay", () => {
 		// of overcast, of which a panel tilted 20° gets 97.6%.
 		expect(isl.irradianceWm2).toBe(609.9);
 		expect(at("15:30")).toBe(49.414); // two hours on, the forecast's own
+	});
+
+	it("scales the satellite's readings for the sky once the sun is well up", async () => {
+		restoreSkyFactors();
+		mockOpenMeteo();
+		const result = await estimate("2026-10-25");
+		const at = (clock: string) => result.total.profileMw[result.profileTimes.indexOf(new Date(`2026-10-25T${clock}:00+13:00`).toISOString())];
+
+		// 1000 W/m² is as clear as the table goes: up 3% with the sun 40° high, down 4% at its highest, 58°.
+		expect(at("07:30")).toBe(49.414);
+		expect(at("10:10")).toBeGreaterThan(49.414 * 1.015);
+		expect(at("13:30")).toBeLessThan(49.414 * 0.97);
+		expect(at("19:00")).toBe(49.414);
 	});
 
 	it("uses the satellite's readings on an NZ morning, while it's still yesterday in UTC", async () => {
