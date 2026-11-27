@@ -1,20 +1,6 @@
 {
 	"name": "nz-solar-stats-api",
-	"description": "Complete backend API template using Hono + Chanfana + D1 + Vitest.",
-	"cloudflare": {
-		"label": "Backend OpenAPI Template",
-		"products": [
-			"Workers",
-			"D1"
-		],
-		"categories": [
-			"storage"
-		],
-		"docs_url": "https://chanfana.com",
-		"preview_icon_url": "https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/1b2805d9-e7fb-4576-5176-6b409e251800/public",
-		"preview_image_url": "https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/cbde46cf-20fa-4548-7f70-1ae8c2f48900/preview",
-		"publish": true
-	},
+	"description": "Estimates of New Zealand's distributed solar capacity, output and energy, per GXP.",
 	"dependencies": {
 		"chanfana": "2.8.3",
 		"hono": "4.11.1",
@@ -37,7 +23,7 @@
 		"cf-typegen": "wrangler types",
 		"gxp-locations": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning scripts/gxp-locations.ts",
 		"deploy": "wrangler deploy",
-		"dev": "pnpm seedLocalDb && wrangler dev",
+		"dev": "npm run seedLocalDb && wrangler dev",
 		"predeploy": "wrangler d1 migrations apply DB --remote",
 		"schema": "npx chanfana",
 		"seedLocalDb": "wrangler d1 migrations apply DB --local",

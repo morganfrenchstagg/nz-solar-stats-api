@@ -1,9 +1,7 @@
 import { ApiException, fromHono } from "chanfana";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { tasksRouter } from "./endpoints/tasks/router";
 import { ContentfulStatusCode } from "hono/utils/http-status";
-import { DummyEndpoint } from "./endpoints/dummyEndpoint";
 import { runWeatherArchiveJob } from "./aggregates/archive";
 import { runAggregateJob } from "./aggregates/job";
 import { runCapacityJob } from "./capacity/job";
@@ -19,7 +17,6 @@ import { SolarProductionForDate, SolarProductionToday } from "./endpoints/solarP
 import { runProductionJob } from "./production/job";
 import { CRONS } from "./schedule";
 
-// Start a Hono app
 const app = new Hono<{ Bindings: Env }>();
 
 // Any site can read the API from a browser, but not write to it.
@@ -34,16 +31,13 @@ app.use("*", async (c, next) => {
 
 app.onError((err, c) => {
 	if (err instanceof ApiException) {
-		// If it's a Chanfana ApiException, let Chanfana handle the response
 		return c.json(
 			{ success: false, errors: err.buildResponse() },
 			err.status as ContentfulStatusCode,
 		);
 	}
 
-	console.error("Global error handler caught:", err); // Log the error if it's not known
-
-	// For other errors, return a generic 500 response
+	console.error("Global error handler caught:", err);
 	return c.json(
 		{
 			success: false,
@@ -53,7 +47,7 @@ app.onError((err, c) => {
 	);
 });
 
-// Setup OpenAPI registry
+// The OpenAPI docs are served at /, and the schema at /openapi.json.
 const openapi = fromHono(app, {
 	docs_url: "/",
 	schema: {
@@ -74,12 +68,6 @@ openapi.get("/solar-energy/daily/:month", SolarEnergyDaily);
 openapi.get("/solar-energy/weekly/:year", SolarEnergyWeekly);
 openapi.get("/solar-energy/monthly/:year", SolarEnergyMonthly);
 openapi.get("/solar-energy/annual", SolarEnergyAnnual);
-
-// Register Tasks Sub router
-openapi.route("/tasks", tasksRouter);
-
-// Register other endpoints
-openapi.post("/dummy/:slug", DummyEndpoint);
 
 export default {
 	fetch: app.fetch,

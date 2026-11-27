@@ -24,9 +24,6 @@ export default defineConfig({
 			},
 		}),
 	],
-	esbuild: {
-		target: "esnext",
-	},
 	test: {
 		setupFiles: ["./tests/apply-migrations.ts"],
 	},
